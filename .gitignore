@@ -4,6 +4,7 @@ node_modules/
 local/.next/
 out/
 dist/
+!.agents/plugins/*/dist/
 coverage/
 *.tsbuildinfo
 next-env.d.ts

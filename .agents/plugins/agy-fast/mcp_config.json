@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "fast": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/dist/mcp-server.mjs"
+      ],
+      "tools": {
+        "batch_search": {
+          "eager": true
+        },
+        "apply_edits": {
+          "eager": true
+        },
+        "read_slices": {
+          "eager": true
+        },
+        "quick_outline": {
+          "eager": true
+        },
+        "run_checks": {
+          "eager": true
+        }
+      }
+    }
+  }
+}

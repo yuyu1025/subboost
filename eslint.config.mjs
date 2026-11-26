@@ -49,6 +49,7 @@ export default defineConfig([
     },
   },
   globalIgnores([
+    ".agents/**",
     ".next/**",
     "dist/**",
     "local/.next/**",

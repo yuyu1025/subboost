@@ -1,0 +1,28 @@
+{
+  "name": "agy-fast",
+  "displayName": "agy-fast",
+  "version": "0.3.1",
+  "description": "Reduce Antigravity task latency with batched search, atomic multi-hunk edits, symbol-aware slice reading, concurrent checks, and fast session snapshots.",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "inkwhite",
+    "url": "https://github.com/INK-Q"
+  },
+  "homepage": "https://github.com/INK-Q/agy-fast",
+  "repository": "https://github.com/INK-Q/agy-fast",
+  "license": "MIT",
+  "keywords": [
+    "performance",
+    "latency",
+    "batch",
+    "search",
+    "edit",
+    "mcp",
+    "productivity"
+  ],
+  "suggestedPrompts": [
+    "Search for all route handlers across the codebase and summarize their symbols",
+    "Apply related edits across multiple files and run typecheck in one call",
+    "Run typecheck, lint, and tests concurrently with compact output"
+  ]
+}
