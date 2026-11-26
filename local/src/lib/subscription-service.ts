@@ -311,6 +311,19 @@ export async function deleteSubscription(ownerId: string, id: string): Promise<b
   return true;
 }
 
+export async function resetSubscriptionLink(ownerId: string, id: string, expectedToken: string) {
+  const token = generateLocalSubscriptionToken();
+  const result = await prisma.subscription.updateMany({
+    where: { id, ownerId, token: expectedToken },
+    data: { token },
+  });
+  if (result.count !== 1) {
+    const exists = await prisma.subscription.findFirst({ where: { id, ownerId }, select: { id: true } });
+    return { status: exists ? "stale" as const : "not_found" as const };
+  }
+  return { status: "updated" as const, subscription: { id, token, subscriptionUrl: buildLocalSubscriptionUrl(token) } };
+}
+
 export function buildSubscriptionFetchCallbacks() {
   return {
     fetchUrlNodes: async (source: SavedSource) => {
@@ -358,7 +371,7 @@ async function persistRefreshSuccess(params: {
       where: { id: params.subscriptionId, updatedAt: params.expectedUpdatedAt },
       data: {
         encryptedNodes: encryptJson(params.snapshot.nodes),
-        encryptedConfig: encryptJson({ ...params.config, sources: params.snapshot.savedSources }),
+        encryptedConfig: encryptJson(params.config),
         encryptedSubscriptionInfo: encryptJson(params.snapshot.subscriptionInfo),
         lastUpdatedAt: params.cachedAt,
         cacheExpiresAt: buildSubscriptionCacheExpiry(params.cachedAt),
@@ -407,7 +420,7 @@ export async function refreshSubscription(ownerId: string, id: string) {
     subscriptionId: row.id,
     expectedUpdatedAt: row.updatedAt,
     snapshot,
-    config: secrets.config,
+    config: refreshResult.refreshedConfig,
     cachedAt,
   });
   if (!persisted) {

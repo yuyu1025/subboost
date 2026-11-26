@@ -5,6 +5,7 @@ import { Button } from "@subboost/ui/components/ui/button";
 import { ChoiceChip, ChoiceGroup } from "@subboost/ui/components/ui/choice-group";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -69,7 +70,7 @@ export function TemplateUploadDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="flex flex-col overflow-hidden sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Upload className="h-5 w-5 text-primary-500" />
@@ -80,7 +81,7 @@ export function TemplateUploadDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-4">
+        <DialogBody className="space-y-4 py-4">
           <FormField label="模板名称" required>
             <Input
               placeholder="例如：流媒体优化配置"
@@ -116,11 +117,11 @@ export function TemplateUploadDialog({
               />
             </ChoiceGroup>
             {mode === "config" ? (
-              <p className="text-xs text-white/50">
+              <p className="text-xs text-fg-50">
                 将保存你当前的配置器设置（模板/分组/规则/DNS/自定义分流/中转等），不包含节点，可直接“使用”应用到配置器。
               </p>
             ) : (
-              <p className="text-xs text-white/50">YAML 模板上传开发中。</p>
+              <p className="text-xs text-fg-50">YAML 模板上传开发中。</p>
             )}
           </div>
 
@@ -163,7 +164,7 @@ export function TemplateUploadDialog({
                 {asDefault || isPublic ? (
                   <Globe className="h-4 w-4 text-green-400" />
                 ) : (
-                  <Lock className="h-4 w-4 text-white/50" />
+                  <Lock className="h-4 w-4 text-fg-50" />
                 )}
                   {visibilityLabel}
                 </span>
@@ -174,7 +175,7 @@ export function TemplateUploadDialog({
               onCheckedChange={(checked) => onPublicChange(checked)}
             />
           )}
-        </div>
+        </DialogBody>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>

@@ -8,6 +8,7 @@ import { DEFAULT_LOAD_BALANCE_STRATEGY } from "@subboost/core/types/config";
 import type {
   BuiltinRuleEdits,
   CustomProxyGroup,
+  CustomRule,
   CustomRuleSet,
   LoadBalanceStrategy,
   ProxyGroup,
@@ -25,8 +26,9 @@ import {
   resolveModuleName,
   resolveModuleNameFromModule,
 } from "./rules";
-import { getModuleRuleOrderKey } from "./module-rules";
+import { createRuleTargetActivation } from "./rule-target-activation";
 import { buildRuleSetUrlFromPath } from "@subboost/core/rules/rule-model";
+import { collectLogicRuleSetIds } from "@subboost/core/rules/custom-rule-value";
 import { buildTypedProxyGroup } from "./proxy-group-type";
 
 export { PROXY_GROUP_MODULES };
@@ -57,6 +59,7 @@ export interface ProxyGroupGenerateOptions {
   testInterval: number;
   customProxyGroups?: CustomProxyGroup[];
   customRuleSets?: CustomRuleSet[];
+  customRules?: CustomRule[];
   proxyGroupAdvanced?: Record<string, ProxyGroupAdvancedConfig>;
   builtinRuleEdits?: BuiltinRuleEdits;
   // 国内服务 GeoIP 规则是否使用 no-resolve（默认 true；关闭可提升命中率但可能造成 DNS 泄露）
@@ -65,6 +68,7 @@ export interface ProxyGroupGenerateOptions {
   experimentalCnUseCnRuleSet?: boolean;
   proxyGroupNameOverrides?: Record<string, string>;
   ruleOrder?: string[];
+  availablePolicyTargets?: string[];
 }
 
 /** @deprecated Use `ProxyGroupGenerateOptions`; retained for 2.x source compatibility. */
@@ -82,22 +86,6 @@ function usesFilteredNodeMembers(group: CustomProxyGroup): boolean {
 
 function isIncludedInGroupMembers(group: CustomProxyGroup): boolean {
   return group.includeInGroupMembers === true;
-}
-
-function customTargetIsDisabled(
-  target: CustomRuleSet["target"],
-  customProxyGroups: CustomProxyGroup[]
-): boolean {
-  const disabled = customProxyGroups.filter((group) => group && group.enabled === false);
-  if (disabled.length === 0) return false;
-  if (typeof target === "object" && target?.kind === "custom") {
-    return disabled.some((group) => group.id === target.id);
-  }
-  if (typeof target === "string") {
-    const name = target.trim();
-    return Boolean(name) && disabled.some((group) => group.name.trim() === name);
-  }
-  return false;
 }
 
 /**
@@ -230,13 +218,14 @@ export function generateProxyGroups(options: ProxyGroupGenerateOptions): ProxyGr
     groupType: ProxyGroupGroupType,
     proxies: string[],
     strategy?: LoadBalanceStrategy,
-    extraFields: Record<string, unknown> = providerUse
+    extraFields: Record<string, unknown> = providerUse,
+    groupTestUrl?: string,
   ): ProxyGroup =>
     buildTypedProxyGroup({
       name,
       groupType,
       proxies,
-      testUrl,
+      testUrl: groupType === "url-test" ? groupTestUrl || testUrl : testUrl,
       testInterval,
       strategy,
       extraFields,
@@ -292,6 +281,7 @@ export function generateProxyGroups(options: ProxyGroupGenerateOptions): ProxyGr
               id: module.id,
               name: moduleName,
             }),
+            undefined, providerUse, advanced?.testUrl,
           ));
         break;
 
@@ -372,7 +362,7 @@ export function generateProxyGroups(options: ProxyGroupGenerateOptions): ProxyGr
 
     if (usesFilteredNodeMembers(customGroup)) {
       if (customGroup.groupType === "url-test" || customGroup.groupType === "fallback") {
-        return createGeneratedProxyGroup(customGroup.name, customGroup.groupType, resolveCustom(filteredNodeNames), undefined, {});
+        return createGeneratedProxyGroup(customGroup.name, customGroup.groupType, resolveCustom(filteredNodeNames), undefined, {}, customGroup.advanced?.testUrl);
       }
       if (customGroup.groupType === "load-balance") {
         return createGeneratedProxyGroup(
@@ -392,7 +382,7 @@ export function generateProxyGroups(options: ProxyGroupGenerateOptions): ProxyGr
       };
     }
     if (customGroup.groupType === "url-test") {
-      return createGeneratedProxyGroup(customGroup.name, customGroup.groupType, resolveCustom(filteredNodeNames));
+      return createGeneratedProxyGroup(customGroup.name, customGroup.groupType, resolveCustom(filteredNodeNames), undefined, providerUse, customGroup.advanced?.testUrl);
     }
     if (customGroup.groupType === "fallback") {
       return createGeneratedProxyGroup(customGroup.name, customGroup.groupType, resolveCustom(filteredNodeNames));
@@ -487,19 +477,23 @@ export function generateRuleProviders(options: ProxyGroupGenerateOptions): Recor
     enabledModules,
     ruleProviderBaseUrl,
     customRuleSets = [],
-    builtinRuleEdits,
-    customProxyGroups = [],
   } = options;
   const providers: Record<string, RuleProvider> = {};
   const enabledSet = new Set(enabledModules);
+  const activation = createRuleTargetActivation({
+    ...options,
+    availablePolicyTargets: options.availablePolicyTargets ?? options.nodes.map((node) => node.name),
+  });
+  const referencedIds = new Set((options.customRules || [])
+    .filter((rule) => activation.customTargetActive(rule.target))
+    .flatMap((rule) => collectLogicRuleSetIds(rule.type, rule.value)));
+  const activeCustomIds = new Set(customRuleSets.filter((rule) => rule?.id && rule.path && activation.customTargetActive(rule.target)).map((rule) => rule.id));
 
   // 预设模块的规则
   for (const proxyModule of PROXY_GROUP_MODULES) {
-    if (!enabledSet.has(proxyModule.id)) continue;
-
     for (const rule of proxyModule.rules) {
-      const edit = builtinRuleEdits?.[getModuleRuleOrderKey(proxyModule.id, rule.id)];
-      if (edit?.enabled === false) continue;
+      if (!activation.builtinRuleActive(proxyModule.id, rule.id) &&
+          (!referencedIds.has(rule.id) || activeCustomIds.has(rule.id) || providers[rule.id])) continue;
       providers[rule.id] = {
         type: "http",
         behavior: rule.behavior,
@@ -511,7 +505,9 @@ export function generateRuleProviders(options: ProxyGroupGenerateOptions): Recor
     }
   }
 
-  if (options.experimentalCnUseCnRuleSet && enabledSet.has("cn") && !providers[EXPERIMENTAL_CN_RULE.id]) {
+  if (((options.experimentalCnUseCnRuleSet && enabledSet.has("cn")) ||
+      (referencedIds.has(EXPERIMENTAL_CN_RULE.id) && !customRuleSets.some((rule) => rule.id === EXPERIMENTAL_CN_RULE.id))) &&
+      !providers[EXPERIMENTAL_CN_RULE.id]) {
     providers[EXPERIMENTAL_CN_RULE.id] = {
       type: "http",
       behavior: EXPERIMENTAL_CN_RULE.behavior,
@@ -524,15 +520,15 @@ export function generateRuleProviders(options: ProxyGroupGenerateOptions): Recor
 
   // 用户新增规则集统一由 customRuleSets 提供，不再挂在某个分流组对象上。
   for (const ruleSet of customRuleSets) {
-    if (customTargetIsDisabled(ruleSet.target, customProxyGroups)) continue;
+    if (!activation.customTargetActive(ruleSet.target) && !referencedIds.has(ruleSet.id)) continue;
     if (!ruleSet?.id || !ruleSet.path || providers[ruleSet.id]) continue;
     providers[ruleSet.id] = {
       type: "http",
       behavior: ruleSet.behavior,
       url: buildRuleSetUrlFromPath(ruleSet.path, ruleProviderBaseUrl),
-      path: `./ruleset/${ruleSet.id}.mrs`,
+      path: `./ruleset/${ruleSet.id}.${ruleSet.format === "text" ? "txt" : ruleSet.format ?? "mrs"}`,
       interval: 86400,
-      format: "mrs",
+      format: ruleSet.format ?? "mrs",
     };
   }
 

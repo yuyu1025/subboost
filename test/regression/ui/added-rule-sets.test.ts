@@ -247,8 +247,10 @@ describe("public ProxyGroupsAddedRuleSets extra branches", () => {
     expect(mocks.store.updateModuleRule).toHaveBeenCalledWith("custom-1", "rule-b", {
       id: "rule-b",
       name: "Rule B",
-      behavior: "ipcidr",
+      behavior: "domain",
+      format: "mrs",
       path: "geosite/renamed.mrs",
+      noResolve: false,
     });
 
     renderAdded({
@@ -258,11 +260,13 @@ describe("public ProxyGroupsAddedRuleSets extra branches", () => {
     mocks.captures.buttons.find((props: any) => props.title === "保存规则集").onClick();
     expect(mocks.store.toggleProxyGroup).not.toHaveBeenCalledWith("fallback");
     expect(mocks.store.moveModuleRule).toHaveBeenCalledWith("custom-1", "rule-b", { kind: "module", id: "fallback" });
-    expect(mocks.store.updateModuleRule).toHaveBeenCalledWith("fallback", "rule-b", {
+    expect(mocks.store.updateModuleRule).toHaveBeenCalledWith("custom-1", "rule-b", {
       id: "rule-b",
       name: "Rule B",
-      behavior: "ipcidr",
+      behavior: "domain",
+      format: "mrs",
       path: "geosite/module.mrs",
+      noResolve: false,
     });
   });
 });

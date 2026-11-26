@@ -46,6 +46,8 @@ vi.mock("next/link", () => ({
   default: ({ href, children }: any) => React.createElement("a", { href }, children),
 }));
 vi.mock("lucide-react", () => ({
+  QrCode: () => null,
+  X: () => null,
   AlertTriangle: () => null,
   Check: () => null,
   Clock: () => null,
@@ -54,6 +56,7 @@ vi.mock("lucide-react", () => ({
   ExternalLink: () => null,
   FileCode: () => null,
   MoreVertical: () => null,
+  Pencil: () => null,
   Plus: () => null,
   RefreshCw: () => null,
   Settings: () => null,

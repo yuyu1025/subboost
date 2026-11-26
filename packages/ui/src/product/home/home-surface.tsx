@@ -76,6 +76,7 @@ function HomeSurfaceInner({ adapter }: Props) {
     ruleProviderBaseUrl,
     testUrl,
     testInterval,
+    sharedHealthChecks,
     cnIpNoResolve,
     experimentalCnUseCnRuleSet,
     proxyGroupNameOverrides,
@@ -121,6 +122,7 @@ function HomeSurfaceInner({ adapter }: Props) {
     ruleProviderBaseUrl,
     testUrl,
     testInterval,
+    sharedHealthChecks,
     cnIpNoResolve,
     experimentalCnUseCnRuleSet,
   });
@@ -174,6 +176,9 @@ function HomeSurfaceInner({ adapter }: Props) {
 
   const isLoadingEditingSubscription = useEditingSubscriptionLoader({
     editSubscriptionId,
+    hasEditingSubscription: Boolean(editingSubscription),
+    userId,
+    authChecked,
     loadSubscription: adapter?.loadSubscription,
     loginHref: adapter?.loginHref ?? adapter?.subscription?.loginHref,
     setCopied,

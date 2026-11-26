@@ -133,6 +133,7 @@ vi.mock("@subboost/ui/components/ui/dialog", () => ({
     return props.children;
   },
   DialogContent: (props: any) => props.children,
+  DialogBody: (props: any) => props.children,
   DialogHeader: (props: any) => props.children,
   DialogTitle: (props: any) => props.children,
 }));
@@ -435,11 +436,11 @@ describe("TemplateLibrarySurface extra branch coverage", () => {
       },
     };
 
-    const loaded = renderQuickTemplates({ 0: true, 1: false, 2: [{ id: "blank", name: "", description: undefined }], 3: "", 4: "blank" }, { runEffects: true });
+    const loaded = renderQuickTemplates({ 0: "catalog", 1: false, 2: [{ id: "blank", name: "", description: undefined }], 4: "", 5: "blank" }, { runEffects: true });
     await flushPromises();
 
     expect(mocks.productApi.templates.loadBuiltinTemplateEngagement).toHaveBeenCalled();
-    expect(loaded.setters[5]).toHaveBeenCalledWith({
+    expect(loaded.setters[6]).toHaveBeenCalledWith({
       minimal: { id: "builtin-minimal", engagementCount: 0, isEngaged: false },
       standard: { id: "builtin-standard", engagementCount: 0, isEngaged: false },
       full: { id: "builtin-full", engagementCount: 0, isEngaged: false },
@@ -453,7 +454,7 @@ describe("TemplateLibrarySurface extra branch coverage", () => {
 
     mocks.productApi = {};
     const noEngagementApi = renderQuickTemplates({}, { runEffects: true });
-    expect(noEngagementApi.setters[5]).not.toHaveBeenCalled();
+    expect(noEngagementApi.setters[6]).not.toHaveBeenCalled();
   });
 
   it("does not update quick template state after cancellable effects are cleaned up", async () => {
@@ -472,12 +473,12 @@ describe("TemplateLibrarySurface extra branch coverage", () => {
       },
     };
 
-    const result = renderQuickTemplates({ 0: true }, { runEffectCleanups: true, runEffects: true });
+    const result = renderQuickTemplates({ 0: "catalog" }, { runEffectCleanups: true, runEffects: true });
     resolveEngagement({});
     resolveCatalog([{ id: "late", name: "Late", description: "Late" }]);
     await flushPromises();
 
-    expect(result.setters[5]).not.toHaveBeenCalled();
+    expect(result.setters[6]).not.toHaveBeenCalled();
     expect(result.setters[2]).not.toHaveBeenCalledWith([{ id: "late", name: "Late", description: "Late" }]);
   });
 

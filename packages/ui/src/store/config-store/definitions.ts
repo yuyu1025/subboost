@@ -7,6 +7,7 @@ import type {
   GroupListenerBinding,
   GroupListenerTarget,
   ProxyGroupAdvancedConfig,
+  ProxyGroupRuleTarget,
   TemplateType,
 } from "@subboost/core/types/config";
 import { DEFAULT_BASE_CONFIG_YAML, DEFAULT_SUBBOOST_CONFIG } from "@subboost/core/config/defaults";
@@ -165,6 +166,8 @@ export async function fetchUrlContentInBrowser(
 }
 
 export interface ConfigState {
+  /** Changes when a new editor session replaces the current draft; never persisted. */
+  draftRevision: number;
   // 节点相关
   nodes: ParsedNode[];
   deletedNodeNames: string[];
@@ -220,6 +223,7 @@ export interface ConfigState {
   allowLan: boolean;
   testUrl: string;
   testInterval: number;
+  sharedHealthChecks: boolean;
   ruleProviderBaseUrl: string;
   cnIpNoResolve: boolean;
   experimentalCnUseCnRuleSet: boolean;
@@ -267,7 +271,7 @@ export interface ConfigActions {
   addCustomRules: (rules: CustomRule[]) => void;
   updateCustomRule: (id: string, rule: Partial<Omit<CustomRule, "id">>) => void;
   removeCustomRule: (index: number) => void;
-  setRuleOrder: (order: string[]) => void;
+  setRuleOrder: (order: string[], allRulesMode?: boolean) => void;
 
   // 自定义分流组
   addCustomProxyGroup: (group: Omit<CustomProxyGroup, "id">) => void;
@@ -281,17 +285,19 @@ export interface ConfigActions {
   updateProxyGroupAdvanced: (moduleId: string, patch: Partial<ProxyGroupAdvancedConfig>) => void;
 
   // 规则集与内置规则编辑
-  addModuleRules: (moduleId: string, rules: RuleSetDraft[]) => void;
+  addModuleRules: (moduleId: ProxyGroupRuleTarget, rules: RuleSetDraft[]) => void;
   updateModuleRule: (
-    moduleId: string,
+    moduleId: ProxyGroupRuleTarget,
     ruleId: string,
-    rule: Partial<Omit<RuleSetDraft, "id">>
+    rule: Partial<Omit<RuleSetDraft, "id">>,
+    sourceTarget?: ProxyGroupRuleTarget
   ) => void;
-  removeModuleRule: (moduleId: string, ruleId: string) => void;
+  removeModuleRule: (moduleId: ProxyGroupRuleTarget, ruleId: string, sourceTarget?: ProxyGroupRuleTarget) => void;
   moveModuleRule: (
-    moduleId: string,
+    moduleId: ProxyGroupRuleTarget,
     ruleId: string,
-    target: { kind: "module" | "custom"; id: string }
+    target: { kind: "module" | "custom"; id: string },
+    sourceTarget?: ProxyGroupRuleTarget
   ) => void;
   restoreModuleRule: (moduleId: string, ruleId: string) => void;
   resetModuleRuleTarget: (moduleId: string, ruleId: string) => void;
@@ -313,6 +319,7 @@ export interface ConfigActions {
   setAllowLan: (allow: boolean) => void;
   setTestUrl: (url: string) => void;
   setTestInterval: (interval: number) => void;
+  setSharedHealthChecks: (enabled: boolean) => void;
   setRuleProviderBaseUrl: (url: string) => void;
   setProxyGroupAdvancedModeEnabled: (value: boolean) => void;
   setCnIpNoResolve: (value: boolean) => void;
@@ -348,6 +355,7 @@ export interface ConfigActions {
 }
 
 export const initialState: ConfigState = {
+  draftRevision: 0,
   nodes: [],
   deletedNodeNames: [],
   deletedNodes: [],
@@ -383,6 +391,7 @@ export const initialState: ConfigState = {
   allowLan: DEFAULT_SUBBOOST_CONFIG.allowLan,
   testUrl: DEFAULT_SUBBOOST_CONFIG.testUrl,
   testInterval: DEFAULT_SUBBOOST_CONFIG.testInterval,
+  sharedHealthChecks: DEFAULT_SUBBOOST_CONFIG.sharedHealthChecks,
   ruleProviderBaseUrl: DEFAULT_SUBBOOST_CONFIG.ruleProviderBaseUrl,
   cnIpNoResolve: DEFAULT_SUBBOOST_CONFIG.cnIpNoResolve,
   experimentalCnUseCnRuleSet: DEFAULT_SUBBOOST_CONFIG.experimentalCnUseCnRuleSet,

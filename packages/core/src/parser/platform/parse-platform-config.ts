@@ -1,6 +1,7 @@
 import { parseConfigLine } from "../config-line-parser";
 import type { ParseResult } from "@subboost/core/types/node";
 import { parsePlatformProxyLine } from "./parse-platform-proxy-line";
+import { addSubscriptionError, checkSubscriptionInput, checkSubscriptionItems, SubscriptionParseLimitError } from "../limits";
 
 function buildParseResult(nodes: ParseResult["nodes"], errors: string[]): ParseResult {
   return {
@@ -12,7 +13,7 @@ function buildParseResult(nodes: ParseResult["nodes"], errors: string[]): ParseR
 }
 
 function formatParseSegmentError(segment: string, error: unknown): string {
-  const reason = error instanceof Error ? error.message : "未知错误";
+  const reason = error instanceof Error ? error.message.slice(0, 500) : "未知错误";
   return `解析失败: ${segment.substring(0, 80)}... - ${reason}`;
 }
 
@@ -48,14 +49,23 @@ function isPlatformDirectPolicyLine(line: string): boolean {
   return /^[^=]+=\s*direct\s*$/i.test(line.trim());
 }
 
+export function isPlatformConfigSectionHeader(line: string): boolean {
+  return /^\[.+\]$/.test(line);
+}
+
 export function looksLikePlatformConfigContent(content: string): boolean {
-  return /^\s*\[(?:proxy|server_local|server_remote|wireguard\s+)/im.test(content);
+  const lines = content.split(/[\r\n]+/).map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#") && !line.startsWith(";"));
+  return lines.some((line) => isPlatformConfigSectionHeader(line) &&
+    /^\[[ \t]*(?:proxy|server_local|server_remote|wireguard\s+)/i.test(line));
 }
 
 export function parsePlatformConfigContent(content: string): ParseResult {
+  checkSubscriptionInput(content);
   const nodes: ParseResult["nodes"] = [];
   const errors: string[] = [];
   const sections = buildSectionMap(content);
+  let count = 0;
 
   for (const [sectionName, sectionLines] of Array.from(sections.entries())) {
     if (!isProxySectionName(sectionName)) continue;
@@ -64,6 +74,7 @@ export function parsePlatformConfigContent(content: string): ParseResult {
       const line = rawLine.trim();
       if (!line || line.startsWith("#") || line.startsWith(";")) continue;
       if (isPlatformDirectPolicyLine(line)) continue;
+      checkSubscriptionItems(++count);
 
       try {
         const platformNode = parsePlatformProxyLine(line, { sections });
@@ -72,7 +83,8 @@ export function parsePlatformConfigContent(content: string): ParseResult {
           continue;
         }
       } catch (error) {
-        errors.push(formatParseSegmentError(line, error));
+        if (error instanceof SubscriptionParseLimitError) throw error;
+        addSubscriptionError(errors, formatParseSegmentError(line, error));
         continue;
       }
 
@@ -80,7 +92,8 @@ export function parsePlatformConfigContent(content: string): ParseResult {
         const node = parseConfigLine(line);
         if (node) nodes.push(node);
       } catch (error) {
-        errors.push(formatParseSegmentError(line, error));
+        if (error instanceof SubscriptionParseLimitError) throw error;
+        addSubscriptionError(errors, formatParseSegmentError(line, error));
       }
     }
   }

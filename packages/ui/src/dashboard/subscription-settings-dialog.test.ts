@@ -61,6 +61,7 @@ vi.mock("@subboost/ui/components/ui/dialog", () => ({
   DialogContent: (props: any) => React.createElement("div", props, props.children),
   DialogDescription: (props: any) => React.createElement("p", props, props.children),
   DialogFooter: (props: any) => React.createElement("footer", props, props.children),
+  DialogBody: (props: any) => React.createElement("div", props, props.children),
   DialogHeader: (props: any) => React.createElement("header", props, props.children),
   DialogTitle: (props: any) => React.createElement("h2", props, props.children),
 }));
@@ -180,5 +181,41 @@ describe("SubscriptionSettingsDialog", () => {
     expect(html).toContain("实际 120，额度 100（连续 3/3 次）");
     expect(html).toContain("请减少导入节点或订阅源，或提高节点额度");
     expect(html).not.toContain("检查订阅 URL");
+  });
+
+  it.each([false, true])("guards closing and settings during link reset: %s", (resettingLink) => {
+    const onResetLink = vi.fn();
+    const html = renderToStaticMarkup(React.createElement(SubscriptionSettingsDialog, {
+      ...baseProps, onResetLink, resettingLink,
+    }));
+    expect(html).toContain(resettingLink ? "重置中..." : "重置订阅链接");
+    expect(captures.buttons.every((button) => button.disabled === resettingLink)).toBe(true);
+    expect(captures.inputs.every((input) => input.disabled === resettingLink)).toBe(true);
+    captures.dialogs[0].onOpenChange(false);
+    expect(baseProps.onOpenChange).toHaveBeenCalledTimes(resettingLink ? 0 : 1);
+    if (!resettingLink) {
+      captures.buttons[0].onClick();
+      expect(onResetLink).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("renders safely while the selected subscription is absent", () => {
+    const html = renderToStaticMarkup(React.createElement(SubscriptionSettingsDialog, {
+      ...baseProps, subscription: null,
+    }));
+    expect(html).toContain("订阅设置");
+    expect(html).not.toContain("自动更新已关闭");
+  });
+
+  it("warns when re-enabling auto-update after a quota suspension", () => {
+    const html = renderToStaticMarkup(React.createElement(SubscriptionSettingsDialog, {
+      ...baseProps, autoUpdateEnabled: true,
+      subscription: { ...baseProps.subscription, autoUpdateState: {
+        ...baseProps.subscription.autoUpdateState, nodeQuotaFailureCount: 3,
+        lastNodeQuotaActual: 120, lastNodeQuotaLimit: 100, disabledReason: "节点数连续超过配额",
+      } },
+    }));
+    expect(html).toContain("实际 120，额度 100");
+    expect(html).toContain("自动更新间隔");
   });
 });

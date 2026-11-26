@@ -20,7 +20,7 @@ const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      "fixed inset-0 z-50 bg-black/70 backdrop-blur-sm",
+      "fixed inset-0 z-50 bg-overlay backdrop-blur-sm",
       className
     )}
     {...props}
@@ -37,14 +37,14 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 p-6 rounded-2xl glass-card max-h-[85vh] overflow-y-auto custom-scrollbar",
+        "fixed left-[50%] top-[50%] z-50 grid min-w-0 w-[calc(100vw-2rem)] max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 p-4 sm:p-6 rounded-2xl glass-card max-h-[85dvh] overflow-y-auto custom-scrollbar",
         className
       )}
       {...props}
     >
       {children}
-      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-lg p-1 opacity-70 transition-all hover:opacity-100 hover:bg-white/5 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 disabled:pointer-events-none">
-        <X className="h-4 w-4 text-white/60" />
+      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-lg p-1 opacity-70 transition-all hover:opacity-100 hover:bg-ink/5 focus:outline-none focus:ring-2 focus:ring-focus-ring disabled:pointer-events-none">
+        <X className="h-4 w-4 text-fg-60" />
         <span className="sr-only">关闭</span>
       </DialogPrimitive.Close>
     </DialogPrimitive.Content>
@@ -58,7 +58,7 @@ const DialogHeader = ({
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
-      "flex flex-col space-y-1.5 text-center sm:text-left",
+      "flex shrink-0 flex-col space-y-1.5 text-center sm:text-left",
       className
     )}
     {...props}
@@ -72,13 +72,28 @@ const DialogFooter = ({
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
-      "flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2",
+      "flex shrink-0 flex-col-reverse gap-2 sm:flex-row sm:justify-end",
       className
     )}
     {...props}
   />
 );
 DialogFooter.displayName = "DialogFooter";
+
+/**
+ * The part of a dialog that scrolls on short screens while the header and footer stay in view.
+ * Give the DialogContent `flex flex-col overflow-hidden` so this body, not the whole dialog, scrolls.
+ */
+const DialogBody = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div
+    className={cn("custom-scrollbar -mr-2 min-h-0 flex-1 overflow-y-auto pr-2", className)}
+    {...props}
+  />
+);
+DialogBody.displayName = "DialogBody";
 
 const DialogTitle = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Title>,
@@ -87,7 +102,7 @@ const DialogTitle = React.forwardRef<
   <DialogPrimitive.Title
     ref={ref}
     className={cn(
-      "text-lg font-semibold leading-none tracking-tight text-white",
+      "text-lg font-semibold leading-none tracking-tight text-fg",
       className
     )}
     {...props}
@@ -101,7 +116,7 @@ const DialogDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Description
     ref={ref}
-    className={cn("text-sm text-white/50", className)}
+    className={cn("text-sm text-fg-50", className)}
     {...props}
   />
 ));
@@ -116,6 +131,7 @@ export {
   DialogContent,
   DialogHeader,
   DialogFooter,
+  DialogBody,
   DialogTitle,
   DialogDescription,
 };

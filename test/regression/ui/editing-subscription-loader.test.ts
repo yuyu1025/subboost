@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ParsedNode } from "@subboost/core/types/node";
 import { useEditingSubscriptionLoader } from "@subboost/ui/product/home/use-editing-subscription-loader";
+import { useUIStore } from "@subboost/ui/store/ui-store";
 
 const mocks = vi.hoisted(() => {
   const bag: {
@@ -38,13 +39,17 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("react", () => ({
+vi.mock("react", async (importOriginal) => ({
+  ...await importOriginal<typeof import("react")>(),
   useState: mocks.useState,
+  useRef: () => ({ current: null }),
   useEffect: mocks.useEffect,
 }));
 
-vi.mock("../../../node_modules/react/index.js", () => ({
+vi.mock("../../../node_modules/react/index.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("react")>(),
   useState: mocks.useState,
+  useRef: () => ({ current: null }),
   useEffect: mocks.useEffect,
 }));
 
@@ -153,6 +158,33 @@ describe("useEditingSubscriptionLoader branch coverage", () => {
     });
   });
 
+  it("returns to a new subscription with the applied template after coming home without an edit id", () => {
+    useUIStore.getState().setEditingSubscription({
+      id: "sub-1",
+      token: "token-1",
+      name: "Existing",
+      autoUpdateInterval: 3600,
+      smartNodeMatchingEnabled: true,
+    });
+    const { reset, generateConfig } = resetStoreState({ appliedTemplateId: "tpl-applied", template: "full" });
+    const options = makeOptions({
+      editSubscriptionId: null,
+      hasEditingSubscription: Boolean(useUIStore.getState().editingSubscription),
+      setEditingSubscription: useUIStore.getState().setEditingSubscription,
+    });
+
+    useEditingSubscriptionLoader(options);
+
+    expect(useUIStore.getState().editingSubscription).toBeNull();
+    expect(options.setSubscriptionName).toHaveBeenCalledWith("");
+    expect(options.setSubscriptionUrl).toHaveBeenCalledWith("");
+    expect(options.setCopied).toHaveBeenCalledWith(false);
+    expect(reset).not.toHaveBeenCalled();
+    expect(generateConfig).not.toHaveBeenCalled();
+    expect(mocks.bag.storeState).toMatchObject({ appliedTemplateId: "tpl-applied", template: "full" });
+    expect(options.loadSubscription).not.toHaveBeenCalled();
+  });
+
   it("uses the fallback error message when a failed response has no public error", async () => {
     const options = makeOptions({
       loadSubscription: vi.fn(async () => response(502, {})),
@@ -166,6 +198,7 @@ describe("useEditingSubscriptionLoader branch coverage", () => {
   });
 
   it("hydrates an empty valid subscription when arrays and config are absent", async () => {
+    useUIStore.setState({ savedDraftSignature: null });
     const { reset, generateConfig } = resetStoreState({
       enabledProxyGroups: ["select", "auto"],
       ruleOrder: ["existing"],
@@ -200,6 +233,8 @@ describe("useEditingSubscriptionLoader branch coverage", () => {
         smartNodeMatchingEnabled: true,
       })
     );
+    // Leaving a just-loaded subscription without changes does not warn about unsaved work.
+    expect(useUIStore.getState().savedDraftSignature).toEqual(expect.any(String));
   });
 
   it("normalizes sparse config sources, module overrides, order lists, and listener ports", async () => {
@@ -266,7 +301,7 @@ describe("useEditingSubscriptionLoader branch coverage", () => {
       ],
       deletedNodeNames: ["B"],
       hiddenProxyGroups: ["cn"],
-      enabledProxyGroups: ["select", "auto", "ai"],
+      enabledProxyGroups: ["select", "auto", "ad", "private", "global", "final"],
       customRuleSets: [
         { id: "ai-ip", name: "ai-ip", behavior: "ipcidr", path: "geoip/ai.mrs", target: "🤖 Labs", noResolve: true },
         { id: "ai-domain", name: "ai-domain", behavior: "domain", path: "geosite/ai.mrs", target: "🤖 Labs" },
@@ -395,7 +430,7 @@ describe("useEditingSubscriptionLoader branch coverage", () => {
     expect(mocks.bag.storeState.ruleOrder).toEqual([]);
   });
 
-  it("preserves current mixed sources when saved urls match and no saved sources exist", async () => {
+  it("does not borrow current mixed sources when saved urls match", async () => {
     resetStoreState({
       sources: [
         {
@@ -441,24 +476,10 @@ describe("useEditingSubscriptionLoader branch coverage", () => {
 
     expect(options.setStoreSources).toHaveBeenCalledWith([
       expect.objectContaining({
-        id: "current-url",
+        id: "1",
         content: "https://same.example/sub",
-        lastParsedContent: "https://same.example/last",
-        tag: "Current",
-        nameTemplate: "{tag}-{name}",
-        useProxyProviders: true,
-        userinfoUrl: "https://same.example/info",
-        userinfoUserAgent: "Same-UA",
-        subscriptionUserInfo: { upload: 1, total: 2 },
-      }),
-      expect.objectContaining({
-        id: "current-yaml",
-        type: "yaml",
-        content: " proxies: [] ",
-        lastParsedContent: "previous yaml",
-        tag: "Y",
-        lastParsedTag: "old-y",
-        lastParsedNameTemplate: "{name}",
+        lastParsedContent: "https://same.example/sub",
+        subscriptionUserInfo: { upload: 10, total: 20 },
       }),
     ]);
   });

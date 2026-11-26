@@ -2,7 +2,7 @@
  * Clash 配置生成器 - 浏览器端运行
  */
 
-import yaml from "js-yaml";
+import { loadMihomoYaml } from "../config/yaml-schema";
 import {
   buildDefaultBaseConfigPatch,
   buildDefaultUserConfig,
@@ -34,8 +34,10 @@ import type {
 } from "@subboost/core/types/config";
 import type { DialerProxyGroup } from "@subboost/core/types/template-config";
 import { collectDnsPolicyEntries, configToYaml } from "./yaml";
+import { shareHealthChecks } from "./shared-health-checks";
 import { isMihomoSupportedProxyNode, normalizeMihomoVlessForGeneration } from "../mihomo/proxy-sanitizer";
-import { chooseFallbackPolicyTarget, withBuiltinPolicyTargets } from "./policy-targets";
+import { getValidDialerRelayGroupNames } from "../subscription/dialer-relay-group-names";
+import { buildPolicyTargetContext } from "./policy-targets";
 import { resolveGroupListenerEntries, type GroupListenerTargetResolution } from "./group-listeners";
 
 export interface GenerateOptions {
@@ -90,7 +92,7 @@ function formatYamlParseError(error: unknown): string {
  */
 function parseBaseConfigYaml(configYaml: string): BaseConfig {
   try {
-    const parsed = yaml.load(configYaml) as unknown;
+    const parsed = loadMihomoYaml(configYaml);
     if (!isPlainObject(parsed)) {
       throw new BaseConfigYamlError("基础和 DNS 配置必须是 YAML 对象（顶层 key/value 映射），不能是字符串、数组、数字、布尔值或 null。");
     }
@@ -287,18 +289,17 @@ export function generateClashConfig(options: GenerateOptions): ClashConfig {
 
   const nodeNameSet = new Set(uniqueNodes.map((n) => n.name));
   const activeCustomProxyGroups = customProxyGroups.filter((g) => g && g.enabled !== false);
-  const customGroupNameSet = new Set<string>(
-    activeCustomProxyGroups.filter((g) => g && typeof g.name === "string" && g.name.trim()).map((g) => g.name.trim())
-  );
-  const moduleGroupNameSet = new Set<string>(
-    PROXY_GROUP_MODULES.map((mod) => resolveProxyGroupModuleName(mod, proxyGroupNameOverrides?.[mod.id]))
-  );
+  const validRelayGroupNames = getValidDialerRelayGroupNames({
+    customProxyGroups,
+    enabledGroups: config.enabledGroups,
+    proxyGroupNameOverrides,
+  });
   const enabledDialerProxyGroups = dialerProxyGroups.filter((g) => g && g.enabled !== false);
   const sanitizedDialerProxyGroups = enabledDialerProxyGroups.length > 0
     ? sanitizeDialerProxyGroups(
         enabledDialerProxyGroups,
         nodeNameSet,
-        new Set([...moduleGroupNameSet, ...customGroupNameSet])
+        validRelayGroupNames
       )
     : [];
 
@@ -310,8 +311,7 @@ export function generateClashConfig(options: GenerateOptions): ClashConfig {
     "DIRECT",
     ...nodeNameSet,
     ...proxyProviderNames,
-    ...moduleGroupNameSet,
-    ...customGroupNameSet,
+    ...validRelayGroupNames,
     ...sanitizedDialerProxyGroups.map((g) => g.name.trim()).filter(Boolean),
   ]);
   const outputNodes = allNodes.map((node) => {
@@ -466,17 +466,9 @@ export function generateClashConfig(options: GenerateOptions): ClashConfig {
     return nextKeys.map((key) => byKey.get(key)).filter(Boolean) as ProxyGroup[];
   })();
 
-  const availablePolicyTargets = withBuiltinPolicyTargets([
-    ...proxyGroups.map((group) => group.name),
-    ...outputNodes.filter((node) => !isSubscriptionInfoNodeName(node.name)).map((node) => node.name),
-  ]);
-  const fallbackPolicyTarget = chooseFallbackPolicyTarget(
-    [
-      proxyGroups[0]?.name,
-      outputNodes.find((node) => !isSubscriptionInfoNodeName(node.name))?.name,
-      "DIRECT",
-    ],
-    availablePolicyTargets
+  const { availablePolicyTargets, fallbackPolicyTarget } = buildPolicyTargetContext(
+    proxyGroups.map((group) => group.name),
+    outputNodes.filter((node) => !isSubscriptionInfoNodeName(node.name)).map((node) => node.name),
   );
   const resolvedListeners = (() => {
     const baseListeners = baseTopLevelPatch.listeners;
@@ -578,7 +570,7 @@ export function generateClashConfig(options: GenerateOptions): ClashConfig {
     
     // 规则提供者（包含自定义分流组的规则）
     "rule-providers": {
-      ...generateRuleProviders(generateOpts),
+      ...generateRuleProviders({ ...generateOpts, customRules: config.customRules, availablePolicyTargets }),
     },
     
     // 规则（包含自定义分流组的规则）
@@ -591,7 +583,7 @@ export function generateClashConfig(options: GenerateOptions): ClashConfig {
     }),
   };
 
-  return clashConfig as unknown as ClashConfig;
+  return (config.sharedHealthChecks === true ? shareHealthChecks(clashConfig) : clashConfig) as unknown as ClashConfig;
 }
 
 /**

@@ -1,6 +1,7 @@
 import { PROXY_GROUP_MODULES } from "@subboost/core/generator/proxy-groups";
 import { resolveProxyGroupModuleName } from "@subboost/core/proxy-group-name";
-import { normalizeProxyGroupTargetRef } from "@subboost/core/proxy-group-targets";
+import { parseProxyGroupTargetValue, resolveProxyGroupTargetContainer, resolveProxyGroupTargetName } from "@subboost/core/proxy-group-targets";
+import { createPolicyTargetResolver } from "@subboost/core/generator/policy-targets";
 import type { CustomProxyGroup, CustomRuleSet, ProxyGroupRuleTarget } from "@subboost/core/types/config";
 import {
   buildRuleSetUrlFromPath,
@@ -8,12 +9,13 @@ import {
   normalizeRuleSetPathInput,
 } from "@subboost/core/rules/rule-model";
 
-export type CustomRoutingRuleSetTarget = {
-  kind: "module" | "custom";
+type RuleSetTargetDetails = {
   id: string;
   name: string;
   value: string;
 };
+export type CustomRoutingRuleSetTarget = RuleSetTargetDetails &
+  ({ kind: "module" | "custom" } | { kind: "literal" });
 
 export type CustomRoutingRuleSetItem = {
   key: string;
@@ -22,8 +24,10 @@ export type CustomRoutingRuleSetItem = {
     id: string;
   };
   id: string;
+  rawTarget?: ProxyGroupRuleTarget;
   name: string;
-  behavior: "domain" | "ipcidr";
+  behavior: CustomRuleSet["behavior"];
+  format?: CustomRuleSet["format"];
   path: string;
   target: CustomRoutingRuleSetTarget;
   noResolve?: boolean;
@@ -39,16 +43,7 @@ export function getRuleSetTargetValue(target: {
 export function parseRuleSetTargetValue(
   value: string,
 ): { kind: "module" | "custom"; id: string } | null {
-  const trimmed = value.trim();
-  if (trimmed.startsWith("module:")) {
-    const id = trimmed.slice("module:".length).trim();
-    return id ? { kind: "module", id } : null;
-  }
-  if (trimmed.startsWith("custom:")) {
-    const id = trimmed.slice("custom:".length).trim();
-    return id ? { kind: "custom", id } : null;
-  }
-  return null;
+  return parseProxyGroupTargetValue(value);
 }
 
 export { buildRuleSetUrlFromPath, extractRuleSetPathFromUrl, normalizeRuleSetPathInput };
@@ -56,9 +51,17 @@ export { buildRuleSetUrlFromPath, extractRuleSetPathFromUrl, normalizeRuleSetPat
 function resolveRuleSetTarget(
   targetValue: ProxyGroupRuleTarget,
   customProxyGroups: CustomProxyGroup[],
-  proxyGroupNameOverrides?: Record<string, string>
+  proxyGroupNameOverrides?: Record<string, string>,
+  literalTargetNames?: readonly string[],
+  enabledModules?: string[],
+  availablePolicyTargets?: string[],
+  fallbackPolicyTarget?: string,
 ): CustomRoutingRuleSetTarget | null {
-  const targetRef = normalizeProxyGroupTargetRef(targetValue);
+  const moduleNames = Object.fromEntries(PROXY_GROUP_MODULES.map((module) => [
+      module.id, resolveProxyGroupModuleName(module, proxyGroupNameOverrides?.[module.id]),
+    ]));
+  const targetOptions = { moduleNames, customProxyGroups, literalTargetNames, enabledModules, availablePolicyTargets };
+  const targetRef = resolveProxyGroupTargetContainer(targetValue, targetOptions);
   if (targetRef?.kind === "module") {
     const proxyModule = PROXY_GROUP_MODULES.find((module) => module.id === targetRef.id);
     if (!proxyModule) return null;
@@ -83,41 +86,28 @@ function resolveRuleSetTarget(
     };
   }
 
-  const target = typeof targetValue === "string" ? targetValue.trim() : "";
-  if (!target) return null;
-
-  for (const proxyModule of PROXY_GROUP_MODULES) {
-    const name = resolveProxyGroupModuleName(proxyModule, proxyGroupNameOverrides?.[proxyModule.id]);
-    if (name !== target) continue;
-    return {
-      kind: "module",
-      id: proxyModule.id,
-      name,
-      value: getRuleSetTargetValue({ kind: "module", id: proxyModule.id }),
-    };
-  }
-
-  const group = customProxyGroups.find((item) => item.name === target);
-  if (group) {
-    return {
-      kind: "custom",
-      id: group.id,
-      name: group.name,
-      value: getRuleSetTargetValue({ kind: "custom", id: group.id }),
-    };
-  }
-
-  return null;
+  const name = resolveProxyGroupTargetName(targetValue, { ...targetOptions, fallbackTarget: fallbackPolicyTarget });
+  if (!availablePolicyTargets && !["DIRECT", "REJECT"].includes(name)) return null;
+  const resolved = createPolicyTargetResolver({ availablePolicyTargets, fallbackPolicyTarget })(name);
+  return resolved ? { kind: "literal", id: resolved, name: resolved, value: `literal:${resolved}` } : null;
 }
 
 export function collectCustomRoutingRuleSets({
   customRuleSets,
   customProxyGroups,
   proxyGroupNameOverrides,
+  literalTargetNames,
+  enabledModules,
+  availablePolicyTargets,
+  fallbackPolicyTarget,
 }: {
   customRuleSets: CustomRuleSet[];
   customProxyGroups: CustomProxyGroup[];
   proxyGroupNameOverrides?: Record<string, string>;
+  literalTargetNames?: readonly string[];
+  enabledModules?: string[];
+  availablePolicyTargets?: string[];
+  fallbackPolicyTarget?: string;
 }): CustomRoutingRuleSetItem[] {
   const items: CustomRoutingRuleSetItem[] = [];
 
@@ -127,14 +117,20 @@ export function collectCustomRoutingRuleSets({
       rule.target,
       customProxyGroups,
       proxyGroupNameOverrides,
+      literalTargetNames,
+      enabledModules,
+      availablePolicyTargets,
+      fallbackPolicyTarget,
     );
     if (!target) continue;
     items.push({
       key: `custom-rule-set:${rule.id}`,
       source: { kind: "custom-rule-set", id: rule.id },
       id: rule.id,
+      rawTarget: rule.target,
       name: rule.name || rule.id,
       behavior: rule.behavior,
+      ...(rule.format !== undefined ? { format: rule.format } : {}),
       path: normalizeRuleSetPathInput(rule.path),
       target,
       noResolve: Boolean(rule.noResolve),

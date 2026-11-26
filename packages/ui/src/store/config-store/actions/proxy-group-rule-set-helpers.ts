@@ -1,8 +1,8 @@
 import { PROXY_GROUP_MODULES } from "@subboost/core/generator/proxy-groups";
-import { normalizePersistedRuleOrder } from "@subboost/core/generator/rules";
+import { buildModuleNameMap, normalizePersistedRuleOrder } from "@subboost/core/generator/rules";
 import { resolveProxyGroupModuleName } from "@subboost/core/proxy-group-name";
-import { normalizeProxyGroupTargetRef } from "@subboost/core/proxy-group-targets";
-import { isValidRuleSetPathOrUrl, normalizeRuleSetPathInput } from "@subboost/core/rules/rule-model";
+import { normalizeProxyGroupRuleTarget, normalizeProxyGroupTargetRef } from "@subboost/core/proxy-group-targets";
+import { isValidRuleSetFormatBehavior, isValidRuleSetPathOrUrl, normalizeRuleSetPathInput } from "@subboost/core/rules/rule-model";
 import type {
   BuiltinRuleEdits,
   CustomProxyGroup,
@@ -11,7 +11,10 @@ import type {
   ProxyGroupTargetRef,
   RuleSetBehavior,
 } from "@subboost/core/types/config";
-import type { RuleSetDraft } from "../definitions";
+import type { ConfigState, RuleSetDraft } from "../definitions";
+import { getGeneratedPolicyTargetContext } from "../generated-policy-targets";
+
+type RuleTargetState = Pick<ConfigState, "customProxyGroups" | "proxyGroupNameOverrides"> & Partial<Pick<ConfigState, "generatedYaml">>;
 
 export function normalizeRuleSetDraft(rule: RuleSetDraft): RuleSetDraft | null {
   if (!rule || typeof rule.id !== "string" || typeof rule.path !== "string") return null;
@@ -20,13 +23,16 @@ export function normalizeRuleSetDraft(rule: RuleSetDraft): RuleSetDraft | null {
   if (!id || !path || !isValidRuleSetPathOrUrl(path)) return null;
   const behavior: RuleSetBehavior = rule.behavior === "ipcidr" || path.toLowerCase().startsWith("geoip/")
     ? "ipcidr"
-    : "domain";
+    : rule.behavior;
+  if (!isValidRuleSetFormatBehavior(rule.format, behavior)) return null;
+  const noResolve = rule.noResolve ?? (behavior === "ipcidr" ? true : undefined);
   return {
     id,
     name: typeof rule.name === "string" && rule.name.trim() ? rule.name.trim() : id,
     behavior,
+    ...(rule.format !== undefined ? { format: rule.format } : {}),
     path,
-    ...(rule.noResolve || behavior === "ipcidr" ? { noResolve: true } : {}),
+    ...(noResolve !== undefined ? { noResolve } : {}),
   };
 }
 
@@ -40,6 +46,7 @@ export function normalizeRuleOrderForState(state: {
   experimentalCnUseCnRuleSet: boolean;
   cnIpNoResolve: boolean;
   ruleOrder: string[];
+  generatedYaml?: string;
 }): string[] {
   return normalizePersistedRuleOrder({
     enabledModules: state.enabledProxyGroups,
@@ -51,6 +58,7 @@ export function normalizeRuleOrderForState(state: {
     experimentalCnUseCnRuleSet: state.experimentalCnUseCnRuleSet,
     cnIpNoResolve: state.cnIpNoResolve,
     ruleOrder: state.ruleOrder,
+    ...getGeneratedPolicyTargetContext(state.generatedYaml),
   });
 }
 
@@ -68,18 +76,6 @@ export function resolveMoveTargetName(
   if (target.kind === "module") return resolveModuleTargetName(target.id, proxyGroupNameOverrides);
   const group = customProxyGroups.find((item) => item.id === target.id);
   return group?.name?.trim() || null;
-}
-
-export function resolveRuleSetContainerTargetName(
-  id: string,
-  customProxyGroups: CustomProxyGroup[],
-  proxyGroupNameOverrides?: Record<string, string>
-): string | null {
-  return (
-    resolveModuleTargetName(id, proxyGroupNameOverrides) ||
-    customProxyGroups.find((group) => group.id === id)?.name?.trim() ||
-    null
-  );
 }
 
 export function compactBuiltinRuleEdits(edits: BuiltinRuleEdits): BuiltinRuleEdits {
@@ -136,11 +132,12 @@ export function findBuiltinRuleEditKeyByTarget(
   edits: BuiltinRuleEdits,
   target: ProxyGroupTargetRef,
   legacyTargetName: string,
-  ruleId: string
+  ruleId: string,
+  state: RuleTargetState = { customProxyGroups: [], proxyGroupNameOverrides: {} }
 ): string | null {
   if (!target.id || !legacyTargetName || !ruleId) return null;
   for (const [key, edit] of Object.entries(edits || {})) {
-    if (!ruleTargetMatchesContainer(edit?.target, target, legacyTargetName)) continue;
+    if (!ruleTargetMatchesContainer(edit?.target, target, legacyTargetName, state)) continue;
     const parts = key.split(":");
     if (parts.length !== 3 || parts[0] !== "module") continue;
     if (parts[2] === ruleId) return key;
@@ -167,9 +164,23 @@ export function appendUniqueCustomRuleSets(
 export function ruleTargetMatchesContainer(
   target: ProxyGroupRuleTarget | undefined,
   container: ProxyGroupTargetRef,
-  legacyTargetName: string
+  legacyTargetName: string,
+  state: RuleTargetState = { customProxyGroups: [], proxyGroupNameOverrides: {} }
 ): boolean {
-  const ref = normalizeProxyGroupTargetRef(target);
-  if (ref) return ref.kind === container.kind && ref.id === container.id;
-  return typeof target === "string" && target.trim() === legacyTargetName.trim();
+  const normalized = normalizeProxyGroupRuleTarget(target, {
+    moduleNames: buildModuleNameMap(state.proxyGroupNameOverrides),
+    customProxyGroups: state.customProxyGroups,
+    literalTargetNames: [legacyTargetName, ...(getGeneratedPolicyTargetContext(state.generatedYaml)?.availablePolicyTargets || [])],
+  });
+  if (typeof normalized === "string") return normalized === legacyTargetName.trim();
+  return normalized?.kind === container.kind && normalized.id === container.id;
+}
+
+export function ruleTargetsEqual(left: ProxyGroupRuleTarget, right: ProxyGroupRuleTarget): boolean {
+  if (typeof left === "string" || typeof right === "string") {
+    return typeof left === "string" && typeof right === "string" && left.trim() === right.trim();
+  }
+  const leftRef = normalizeProxyGroupTargetRef(left);
+  const rightRef = normalizeProxyGroupTargetRef(right);
+  return Boolean(leftRef && rightRef && leftRef.kind === rightRef.kind && leftRef.id === rightRef.id);
 }

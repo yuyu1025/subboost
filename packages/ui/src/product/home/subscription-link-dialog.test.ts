@@ -59,6 +59,7 @@ vi.mock("@subboost/ui/components/ui/dialog", () => ({
   DialogContent: (props: any) => React.createElement("div", props, props.children),
   DialogDescription: (props: any) => React.createElement("p", props, props.children),
   DialogFooter: (props: any) => React.createElement("footer", props, props.children),
+  DialogBody: (props: any) => React.createElement("div", props, props.children),
   DialogHeader: (props: any) => React.createElement("header", props, props.children),
   DialogTitle: (props: any) => React.createElement("h2", props, props.children),
 }));
@@ -136,6 +137,7 @@ describe("SubscriptionLinkDialog", () => {
 
     expect(captures.dialogs[0]).toMatchObject({ open: true });
     expect(html).toContain("生成订阅链接");
+    expect(html).not.toContain("<svg");
     expect(html).toContain("更新时智能匹配节点");
     expect(html).toContain("启用自动更新");
     expect(html).toContain("自动更新间隔");
@@ -172,6 +174,8 @@ describe("SubscriptionLinkDialog", () => {
     expect(html).toContain("订阅链接已更新");
     expect(html).toContain("复制下方链接到 Clash 客户端导入使用");
     expect(html).toContain("更新成功");
+    expect(html).toContain("<svg");
+    expect(html).toContain("订阅链接二维码");
     expect(html).toContain("check-icon");
     expect(captures.inputs[0]).toMatchObject({
       value: "https://sub.example.com/sub/token",

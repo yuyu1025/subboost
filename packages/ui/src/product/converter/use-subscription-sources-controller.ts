@@ -61,6 +61,13 @@ function sourceMetaNeedsReimport(patch: Partial<SubscriptionSource>): boolean {
   );
 }
 
+/** state-dir values of known Tailscale nodes, excluding those owned by one source. */
+function collectTailscaleStateDirs(nodes: ParsedNode[], excludeSourceId?: string): unknown[] {
+  return nodes
+    .filter((node) => node.type === "tailscale" && !(excludeSourceId && getNodeSourceIds(node).includes(excludeSourceId)))
+    .map((node) => (node as unknown as Record<string, unknown>)["state-dir"]);
+}
+
 export function useSubscriptionSourcesController({ mode }: Options) {
   const { nodes, parseErrors, sources, setSources, parseSingleSource } = useConfigStore();
   const { user } = useUserStore();
@@ -138,14 +145,22 @@ export function useSubscriptionSourcesController({ mode }: Options) {
     setExpandedSourceId(null);
   }, [expandedSource, expandedSourceSnapshot, parseSingleSource]);
 
+  const ensureSourceQuota = React.useCallback(
+    (type: SourceType): boolean => {
+      const used = sources.filter((source) => source.type === type).length;
+      if (used < maxSourcesPerType) return true;
+      toast({
+        title: user ? `每种导入方式最多 ${maxSourcesPerType} 个` : "未登录用户每种导入方式最多 2 个（登录后可提升）",
+        variant: "warning",
+      });
+      return false;
+    },
+    [maxSourcesPerType, sources, user]
+  );
+
   const addSource = React.useCallback(
     (type: SourceType = "url") => {
-      const used = sources.filter((source) => source.type === type).length;
-      if (used >= maxSourcesPerType) {
-        toast({
-          title: user ? `每种导入方式最多 ${maxSourcesPerType} 个` : "未登录用户每种导入方式最多 2 个（登录后可提升）",
-          variant: "warning",
-        });
+      if (!ensureSourceQuota(type)) {
         setShowAddMenu(false);
         return;
       }
@@ -163,7 +178,27 @@ export function useSubscriptionSourcesController({ mode }: Options) {
       });
       setShowAddMenu(false);
     },
-    [interactions, maxSourcesPerType, mode, setSources, sources, user]
+    [ensureSourceQuota, interactions, mode, setSources, sources]
+  );
+
+  /** Write form-applied content and close the editor, importing at most once. */
+  const applyExpandedSourceContent = React.useCallback(
+    (content: string) => {
+      if (!expandedSource || expandedSource.content === content) {
+        closeExpandedSourceEditor();
+        return;
+      }
+      const sourceId = expandedSource.id;
+      setSources(sources.map((source) => (source.id === sourceId ? markSourceAsPendingImport({ ...source, content }) : source)));
+      setExpandedSourceId(null);
+      if (!expandedSource.parsing) void parseSingleSource(sourceId);
+    },
+    [closeExpandedSourceEditor, expandedSource, parseSingleSource, setSources, sources]
+  );
+
+  const expandedSourceTailscaleStateDirs = React.useMemo(
+    () => collectTailscaleStateDirs(nodes, expandedSource?.id),
+    [expandedSource?.id, nodes]
   );
 
   const removeSource = React.useCallback(
@@ -276,7 +311,9 @@ export function useSubscriptionSourcesController({ mode }: Options) {
 
   return {
     addSource,
+    applyExpandedSourceContent,
     closeExpandedSourceEditor,
+    expandedSourceTailscaleStateDirs,
     error,
     expandedSource,
     expandedSourcePreviewName,

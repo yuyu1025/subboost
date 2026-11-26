@@ -9,8 +9,10 @@ import { Input } from "@subboost/ui/components/ui/input";
 import { Switch } from "@subboost/ui/components/ui/switch";
 import { SwitchField } from "@subboost/ui/components/ui/switch-field";
 import { SmartNodeMatchingHelp } from "@subboost/ui/components/subscription/smart-node-matching-help";
+import { SubscriptionQrCode } from "@subboost/ui/product/subscription/subscription-qr-code";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -66,7 +68,7 @@ export function SubscriptionLinkDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="flex flex-col overflow-hidden sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <LinkIcon className="h-5 w-5 text-indigo-400" />
@@ -84,7 +86,7 @@ export function SubscriptionLinkDialog({
         </DialogHeader>
 
         {!subscriptionUrl ? (
-          <div className="space-y-4 py-4">
+          <DialogBody className="space-y-4 py-4">
             <FormField label="订阅名称">
               <Input
                 placeholder="例如：我的配置"
@@ -94,11 +96,11 @@ export function SubscriptionLinkDialog({
               />
             </FormField>
 
-            <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+            <div className="rounded-lg border border-ink/10 bg-ink/5 p-3">
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <p className="text-sm text-white/80">更新时智能匹配节点</p>
+                    <p className="text-sm text-fg-80">更新时智能匹配节点</p>
                     <SmartNodeMatchingHelp enabled={smartNodeMatchingEnabled} />
                   </div>
                 </div>
@@ -109,7 +111,7 @@ export function SubscriptionLinkDialog({
                 />
               </div>
 
-              <div className="my-3 border-t border-white/10" />
+              <div className="my-3 border-t border-ink/10" />
 
               <SwitchField
                 label="启用自动更新"
@@ -137,7 +139,7 @@ export function SubscriptionLinkDialog({
 
             <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-sm text-amber-200">
               <p className="font-medium mb-1">注意事项</p>
-              <ul className="text-xs text-amber-200/70 space-y-1">
+              <ul className="text-xs text-warning-muted-fg space-y-1">
                 <li>🔒 配置数据将加密存储于服务器</li>
                 <li>🔑 订阅链接相当于访问凭证，请勿公开分享</li>
                 <li>⏱️ 客户端高频拉取订阅会被封禁，请合理配置</li>
@@ -151,9 +153,10 @@ export function SubscriptionLinkDialog({
                 )}
               </ul>
             </div>
-          </div>
+          </DialogBody>
         ) : (
-          <div className="space-y-4 py-4">
+          <DialogBody className="space-y-4 py-4">
+            <SubscriptionQrCode url={subscriptionUrl} />
             <div className="space-y-2">
               <p className="text-sm font-medium">订阅链接</p>
               <div className="flex gap-2">
@@ -177,11 +180,11 @@ export function SubscriptionLinkDialog({
               <p className="text-green-200 font-medium mb-1">
                 ✅ {isEditingExistingSubscription ? "更新成功" : "创建成功"}
               </p>
-              <p className="text-xs text-green-200/70">
+              <p className="text-xs text-success-muted-fg">
                 {isEditingExistingSubscription ? "订阅链接保持不变，可在仪表盘查看" : "您可以在仪表盘中管理所有订阅"}
               </p>
             </div>
-          </div>
+          </DialogBody>
         )}
 
         <DialogFooter>

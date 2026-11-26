@@ -19,6 +19,32 @@ import {
 import type { CustomProxyGroup, CustomRule, CustomRuleSet } from "@subboost/core/types/config";
 
 describe("custom routing rule set helpers", () => {
+  it("retains explicit formats when listing literal and fallback rule sets", () => {
+    const items = collectCustomRoutingRuleSets({
+      customProxyGroups: [], availablePolicyTargets: ["Node", "DIRECT"], fallbackPolicyTarget: "Node",
+      customRuleSets: [
+        { id: "text", name: "Text", behavior: "domain", format: "text", path: "https://local.subboost.test/rules/text.txt", target: "DIRECT" },
+        { id: "fallback", name: "Fallback", behavior: "domain", path: "geosite/fallback.mrs", target: "Missing" },
+      ],
+    });
+    expect(items).toEqual([
+      expect.objectContaining({ id: "text", format: "text", rawTarget: "DIRECT", target: expect.objectContaining({ name: "DIRECT" }) }),
+      expect.objectContaining({ id: "fallback", rawTarget: "Missing", target: expect.objectContaining({ name: "Node" }) }),
+    ]);
+    expect(items[1]).not.toHaveProperty("format");
+  });
+  it("keeps literal and fallback policies addressable without converting their stored targets", () => {
+    const items = collectCustomRoutingRuleSets({
+      customProxyGroups: [], enabledModules: ["select"], availablePolicyTargets: ["🚀 节点选择", "module:cn", "DIRECT", "REJECT"],
+      fallbackPolicyTarget: "🚀 节点选择", literalTargetNames: ["module:cn"],
+      customRuleSets: ["module:cn", "DIRECT", "Missing"].map((target, index) => ({
+        id: `rule-${index}`, name: `Rule ${index}`, behavior: "domain" as const, path: "geosite/fixture.mrs", target,
+      })),
+    });
+    expect(items.map((item) => [item.rawTarget, item.target.kind, item.target.name])).toEqual([
+      ["module:cn", "literal", "module:cn"], ["DIRECT", "literal", "DIRECT"], ["Missing", "literal", "🚀 节点选择"],
+    ]);
+  });
   it("parses, normalizes, and builds rule-set targets and paths", () => {
     expect(getRuleSetTargetValue({ kind: "module", id: "select" })).toBe("module:select");
     expect(parseRuleSetTargetValue(" module: select ")).toEqual({ kind: "module", id: "select" });
@@ -176,7 +202,7 @@ describe("custom rule batch import", () => {
         "DOMAIN,existing.com,PROXY",
         "DOMAIN,batch.com,PROXY",
         "DOMAIN,batch.com,PROXY",
-        "\"DOMAIN-SUFFIX\",\"quoted,domain\",\"DIRECT\"",
+        "\"DOMAIN-REGEX\",\"quoted,domain\",\"DIRECT\"",
         "\"DOMAIN\",\"a\"\"b.com\",\"PROXY\"",
       ].join("\r\n"),
       defaultType: "DOMAIN-SUFFIX",
@@ -186,9 +212,9 @@ describe("custom rule batch import", () => {
       existingRules,
     });
 
-    expect(result.readyCount).toBe(4);
+    expect(result.readyCount).toBe(5);
     expect(result.skippedCount).toBe(3);
-    expect(result.errorCount).toBe(7);
+    expect(result.errorCount).toBe(6);
     expect(result.duplicateCount).toBe(2);
     expect(result.canImport).toBe(false);
     expect(result.items.map((item) => item.status)).toEqual([
@@ -199,7 +225,7 @@ describe("custom rule batch import", () => {
       "ready",
       "error",
       "error",
-      "error",
+      "ready",
       "error",
       "error",
       "error",
@@ -210,9 +236,10 @@ describe("custom rule batch import", () => {
       "ready",
     ]);
     expect(result.rules).toEqual([
-      expect.objectContaining({ type: "DOMAIN-SUFFIX", value: "example.org", target: "PROXY", noResolve: true }),
+      expect.objectContaining({ type: "DOMAIN-SUFFIX", value: "example.org", target: "PROXY", noResolve: false }),
+      expect.objectContaining({ type: "DOMAIN", value: "example.com", target: "PROXY", noResolve: false }),
       expect.objectContaining({ type: "DOMAIN", value: "batch.com", target: "PROXY", noResolve: false }),
-      expect.objectContaining({ type: "DOMAIN-SUFFIX", value: "quoted,domain", target: "DIRECT", noResolve: false }),
+      expect.objectContaining({ type: "DOMAIN-REGEX", value: "quoted,domain", target: "DIRECT", noResolve: false }),
       expect.objectContaining({ type: "DOMAIN", value: "a\"b.com", target: "PROXY", noResolve: false }),
     ]);
   });
@@ -241,7 +268,7 @@ describe("custom rule batch import", () => {
 
     expect(ready.items.map((item) => item.status)).toEqual(["ready", "ready"]);
     expect(ready.rules).toEqual([
-      expect.objectContaining({ type: "DOMAIN", value: "example.com", target: "PROXY", noResolve: true }),
+      expect.objectContaining({ type: "DOMAIN", value: "example.com", target: "PROXY", noResolve: false }),
       expect.objectContaining({ type: "DOMAIN-SUFFIX", value: "example.org", target: "PROXY", noResolve: false }),
     ]);
     expect(ready.canImport).toBe(true);
@@ -277,7 +304,7 @@ describe("custom rule batch import", () => {
         type: "DOMAIN",
         value: "two-column.example",
         target: "PROXY",
-        noResolve: true,
+        noResolve: false,
       }),
     ]);
   });

@@ -2,13 +2,17 @@
  * Clash YAML 配置解析器
  */
 
-import yaml from "js-yaml";
-import type { ParsedNode, ParseResult, UnknownNodeType, XHttpOpts } from "@subboost/core/types/node";
+import { loadSubscriptionYaml } from "./yaml-scalars";
+import { YAMLException } from "js-yaml";
+import type { BaseNode, ParsedNode, ParseResult, UnknownNodeType, XHttpOpts } from "@subboost/core/types/node";
 import { normalizeRealityShortId } from "@subboost/core/mihomo/reality";
 import { canonicalizeParsedNode } from "./canonical-fields";
 import { normalizePortsSpecValue, parsePortNumber, pickStablePortFromPorts } from "./port-spec";
 import { normalizeSsPlugin } from "./protocols/ss";
 import { splitWsPathEarlyData } from "./ws-early-data";
+import { getNodeEndpointError } from "../node-endpoint";
+import { MIHOMO_STRING_SCALAR_FIELDS, normalizeMihomoStringScalar } from "../mihomo/string-scalar";
+import { addSubscriptionError, boundSubscriptionError, checkSubscriptionInput, checkSubscriptionItems, MAX_SUBSCRIPTION_ERROR_LENGTH, MAX_SUBSCRIPTION_OUTPUT_LENGTH, SubscriptionParseLimitError } from "./limits";
 
 interface ClashConfig {
   proxies?: Record<string, unknown>[];
@@ -17,6 +21,16 @@ interface ClashConfig {
   rules?: string[];
   dns?: unknown;
   [key: string]: unknown;
+}
+
+function formatYamlParseError(error: unknown): string {
+  const prefix = "YAML 解析错误: ";
+  if (error instanceof YAMLException) {
+    const position = error.mark ? ` (line ${error.mark.line + 1}, column ${error.mark.column + 1})` : "";
+    const reason = boundSubscriptionError(error.reason || "未知错误", MAX_SUBSCRIPTION_ERROR_LENGTH - prefix.length - position.length);
+    return `${prefix}${reason}${position}`;
+  }
+  return `${prefix}${boundSubscriptionError(error instanceof Error ? error.message : "未知错误", MAX_SUBSCRIPTION_ERROR_LENGTH - prefix.length)}`;
 }
 
 function applyWsEarlyDataInPlace(node: Record<string, unknown>) {
@@ -39,8 +53,8 @@ function applyWsEarlyDataInPlace(node: Record<string, unknown>) {
 
 function normalizeClashYamlScalarText(content: string): string {
   return content.replace(
-    /^(\s*short-id\s*:\s*)([0-9]+)(\s*(?:#.*)?)$/gm,
-    (_match, prefix: string, value: string, suffix: string) => `${prefix}"${value}"${suffix || ""}`
+    /^([ \t]*short-id[ \t]*:[ \t]*)([0-9]+)([ \t]*(?:#[^\r\n]*)?)(\r?)$/gm,
+    (_match, prefix: string, value: string, suffix: string, ending: string) => `${prefix}"${value}"${suffix}${ending}`
   );
 }
 
@@ -100,6 +114,13 @@ function repairRootFlowProxyListIndent(input: string): string {
   const canonicalIndent = countLeadingSpaces(lines[itemIndexes[0]]);
   if (itemIndexes.every((index) => countLeadingSpaces(lines[index]) === canonicalIndent)) return input;
 
+  let outputLength = input.length;
+  for (const index of itemIndexes) {
+    outputLength += canonicalIndent - countLeadingSpaces(lines[index]);
+    if (outputLength > MAX_SUBSCRIPTION_OUTPUT_LENGTH) {
+      throw new SubscriptionParseLimitError("YAML 缩进修复后的内容超过大小上限");
+    }
+  }
   for (const index of itemIndexes) {
     lines[index] = `${" ".repeat(canonicalIndent)}${lines[index].trimStart()}`;
   }
@@ -111,12 +132,20 @@ function repairInlineListIndent(input: string): string {
   // 逐个列表项消费其后续块，确保每一行最多检查一次，避免大型订阅退化为 O(n²)。
   const lines = input.split(/\r?\n/);
   const out: string[] = [];
+  let outputLength = 0;
+  const append = (line: string) => {
+    outputLength += line.length + 1;
+    if (outputLength > MAX_SUBSCRIPTION_OUTPUT_LENGTH) {
+      throw new SubscriptionParseLimitError("YAML 缩进修复后的内容超过大小上限");
+    }
+    out.push(line);
+  };
 
   for (let index = 0; index < lines.length; ) {
     const line = lines[index];
     const match = line.match(/^(\s*)-\s*(name\s*:\s*.+)$/);
     if (!match) {
-      out.push(line);
+      append(line);
       index += 1;
       continue;
     }
@@ -141,12 +170,15 @@ function repairInlineListIndent(input: string): string {
     }
 
     if (minIndent !== Number.POSITIVE_INFINITY && minIndent > keyIndent) {
-      out.push(`${" ".repeat(dashIndent)}-`);
-      out.push(`${" ".repeat(minIndent)}${match[2]}`);
+      if (outputLength + dashIndent + minIndent + match[2].length + 3 > MAX_SUBSCRIPTION_OUTPUT_LENGTH) {
+        throw new SubscriptionParseLimitError("YAML 缩进修复后的内容超过大小上限");
+      }
+      append(`${" ".repeat(dashIndent)}-`);
+      append(`${" ".repeat(minIndent)}${match[2]}`);
     } else {
-      out.push(line);
+      append(line);
     }
-    out.push(...lines.slice(index + 1, blockEnd));
+    for (let next = index + 1; next < blockEnd; next += 1) append(lines[next]);
     index = blockEnd;
   }
 
@@ -161,15 +193,26 @@ export function parseClashYaml(content: string): ParseResult {
   const errors: string[] = [];
 
   try {
-    const normalizeTabs = (s: string) => s.replace(/\t/g, "  ");
+    checkSubscriptionInput(content);
+    const normalizeTabs = (s: string) => {
+      let length = s.length;
+      for (const char of s) if (char === "\t" && ++length > MAX_SUBSCRIPTION_OUTPUT_LENGTH) {
+        throw new SubscriptionParseLimitError("YAML 制表符展开后的内容超过大小上限");
+      }
+      return s.replace(/\t/g, "  ");
+    };
 
-    const tryLoad = (raw: string): unknown => yaml.load(raw) as unknown;
+    const tryLoad = loadSubscriptionYaml;
     const normalizedContent = normalizeClashYamlScalarText(normalizeTabs(content));
+    if (normalizedContent.length > MAX_SUBSCRIPTION_OUTPUT_LENGTH) {
+      throw new SubscriptionParseLimitError("YAML 标量规范化后的内容超过大小上限");
+    }
 
     let parsed: unknown;
     try {
       parsed = tryLoad(normalizedContent);
     } catch (e) {
+      if (e instanceof SubscriptionParseLimitError) throw e;
       // 尝试修复缩进后再解析一次
       const repaired = repairRootFlowProxyListIndent(repairInlineListIndent(normalizedContent));
       parsed = tryLoad(repaired);
@@ -189,13 +232,16 @@ export function parseClashYaml(content: string): ParseResult {
       const config = parsed as ClashConfig;
 
       if (config.proxies && Array.isArray(config.proxies)) {
+        checkSubscriptionItems(config.proxies.length);
         for (const proxy of config.proxies) {
           try {
             const node = normalizeNode(proxy);
             if (node) nodes.push(canonicalizeParsedNode(node));
           } catch (e) {
-            errors.push(
-              `节点 "${(proxy as any)?.name || "未知"}" 解析失败: ${e instanceof Error ? e.message : "未知错误"}`
+            if (e instanceof SubscriptionParseLimitError) throw e;
+            const name = typeof proxy?.name === "string" ? proxy.name.slice(0, 100) : "未知";
+            addSubscriptionError(errors,
+              `节点 "${name}" 解析失败: ${e instanceof Error ? e.message.slice(0, 500) : "未知错误"}`
             );
           }
         }
@@ -205,7 +251,8 @@ export function parseClashYaml(content: string): ParseResult {
           const node = normalizeNode(config as unknown as Record<string, unknown>);
           if (node) nodes.push(canonicalizeParsedNode(node));
         } catch (e) {
-          errors.push(`节点解析失败: ${e instanceof Error ? e.message : "未知错误"}`);
+          if (e instanceof SubscriptionParseLimitError) throw e;
+          addSubscriptionError(errors, `节点解析失败: ${e instanceof Error ? e.message.slice(0, 500) : "未知错误"}`);
         }
       }
 
@@ -218,11 +265,12 @@ export function parseClashYaml(content: string): ParseResult {
 
       // 注意：proxy-providers 需要在服务器端拉取，浏览器端无法直接获取
       if (hasProxyProviders) {
-        errors.push(
+        addSubscriptionError(errors,
           "检测到 proxy-providers 配置，由于浏览器限制无法自动拉取，请直接粘贴节点内容"
         );
       }
     } else if (Array.isArray(parsed)) {
+      checkSubscriptionItems(parsed.length);
       // 3) 仅粘贴了 proxies 列表（YAML 顶层为数组）
       for (const proxy of parsed) {
         if (!proxy || typeof proxy !== "object") continue;
@@ -230,13 +278,14 @@ export function parseClashYaml(content: string): ParseResult {
           const node = normalizeNode(proxy as Record<string, unknown>);
           if (node) nodes.push(canonicalizeParsedNode(node));
         } catch (e) {
-          const name = (proxy as any)?.name || "未知";
-          errors.push(`节点 "${name}" 解析失败: ${e instanceof Error ? e.message : "未知错误"}`);
+          if (e instanceof SubscriptionParseLimitError) throw e;
+          const name = typeof proxy.name === "string" ? proxy.name.slice(0, 100) : "未知";
+          addSubscriptionError(errors, `节点 "${name}" 解析失败: ${e instanceof Error ? e.message.slice(0, 500) : "未知错误"}`);
         }
       }
     } else {
       // 其他：无法识别为 Clash YAML
-      errors.push("无法识别为 Clash YAML（缺少 proxies 或节点字段）");
+      addSubscriptionError(errors, "无法识别为 Clash YAML（缺少 proxies 或节点字段）");
     }
 
     return {
@@ -246,9 +295,12 @@ export function parseClashYaml(content: string): ParseResult {
       totalFailed: errors.length,
     };
   } catch (e) {
+    if (e instanceof SubscriptionParseLimitError) {
+      return { nodes: [], errors: [e.message], totalParsed: 0, totalFailed: 1 };
+    }
     return {
       nodes: [],
-      errors: [`YAML 解析错误: ${e instanceof Error ? e.message : "未知错误"}`],
+      errors: [formatYamlParseError(e)],
       totalParsed: 0,
       totalFailed: 1,
     };
@@ -270,8 +322,21 @@ function normalizeNode(proxy: Record<string, unknown>): ParsedNode | null {
   }
 
   const name = (proxy.name as string) || "未命名节点";
-  if (type === "direct" || type === "dns") {
+  proxy = { ...proxy };
+  for (const field of MIHOMO_STRING_SCALAR_FIELDS) {
+    if (proxy[field] === undefined || proxy[field] === null) continue;
+    const value = normalizeMihomoStringScalar(proxy[field]);
+    if (value === undefined) throw new Error(`${field} 必须是字符串或可无损表示的整数`);
+    proxy[field] = value;
+  }
+  if (type === "direct" || type === "dns" || type === "reject") {
     return { ...proxy, name, type } as unknown as ParsedNode;
+  }
+
+  if (type === "wireguard" && Array.isArray(proxy.peers)) {
+    proxy.peers = proxy.peers.map((peer) => peer && typeof peer === "object" && !Array.isArray(peer)
+      ? { ...peer, port: parsePortNumber(peer.port) }
+      : peer);
   }
 
   const server = proxy.server as string;
@@ -282,19 +347,17 @@ function normalizeNode(proxy: Record<string, unknown>): ParsedNode | null {
   const shouldNormalizePorts = (isHysteria2 || isHysteria) && ports;
   const port = parsePortNumber(proxy.port) ?? (supportsPortsOnly && ports ? pickStablePortFromPorts(ports) : undefined);
 
-  if (!server || port === undefined) {
-    throw new Error("缺少服务器地址或端口无效");
-  }
-
   // 透传上游字段：避免因字段映射表不完整而丢失协议关键参数（如 hy2 ports / vless client-fingerprint 等）
   const baseNode = {
     ...proxy,
     name,
     type,
-    server,
-    port,
+    ...(server !== undefined ? { server } : {}),
+    ...(proxy.port !== undefined || port !== undefined ? { port } : {}),
     ...(shouldNormalizePorts ? { ports } : {}),
-  };
+  } as BaseNode;
+  const endpointError = getNodeEndpointError(baseNode);
+  if (endpointError) throw new Error(endpointError);
   applyWsEarlyDataInPlace(baseNode as unknown as Record<string, unknown>);
 
   switch (type) {
@@ -504,6 +567,9 @@ function normalizeNode(proxy: Record<string, unknown>): ParsedNode | null {
     case "mieru":
     case "masque":
     case "sudoku":
+    case "wireguard":
+    case "trusttunnel":
+    case "tailscale":
       return { ...(baseNode as Record<string, unknown>), type } as unknown as ParsedNode;
 
     default:

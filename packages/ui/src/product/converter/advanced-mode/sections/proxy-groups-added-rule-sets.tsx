@@ -16,7 +16,7 @@ import { toast } from "@subboost/ui/components/ui/toaster";
 import { PROXY_GROUP_MODULES } from "@subboost/core/generator/proxy-groups";
 import { getModuleRuleOrderKey } from "@subboost/core/generator/module-rules";
 import { resolveProxyGroupModuleName } from "@subboost/core/proxy-group-name";
-import { resolveProxyGroupTargetName } from "@subboost/core/proxy-group-targets";
+import { resolveProxyGroupTargetContainer } from "@subboost/core/proxy-group-targets";
 import {
   collectCustomRoutingRuleSets,
   getRuleSetTargetValue,
@@ -25,10 +25,14 @@ import {
   type CustomRoutingRuleSetItem,
 } from "@subboost/core/rules/custom-routing-rule-sets";
 import { DEFAULT_RULE_PROVIDER_BASE_URL } from "@subboost/core/rules/metadata";
+import { useProductApiAdapter } from "@subboost/ui/product/api-adapter";
+import { resolveRuleSetUrl, useRuleSetOperation } from "./use-rule-set-resolution";
+import type { CustomRuleSet, RuleSetMetadata } from "@subboost/core/types/config";
 import {
   useConfigStore,
   type RuleSetDraft as StoreRuleSetDraft,
 } from "@subboost/ui/store/config-store";
+import { getGeneratedPolicyTargetContext } from "@subboost/ui/store/config-store/generated-policy-targets";
 import {
   RULE_EDIT_ACTIONS_CLASS,
   RULE_EDIT_PRIMARY_FIELD_CLASS,
@@ -82,10 +86,17 @@ export function ProxyGroupsAddedRuleSets({
     updateModuleRule,
     removeModuleRule,
     moveModuleRule,
+    generatedYaml,
   } = useConfigStore();
 
   const [editingKey, setEditingKey] = React.useState<string | null>(null);
   const [draft, setDraft] = React.useState<RuleSetDraft | null>(null);
+  const api = useProductApiAdapter();
+  const operation = useRuleSetOperation(JSON.stringify([editingKey, draft, customRuleSets]));
+  const policyContext = React.useMemo(() => getGeneratedPolicyTargetContext(generatedYaml), [generatedYaml]);
+  const literalTargetNames = React.useMemo(() => [
+    ...customProxyGroups.map((group) => group.name), ...(policyContext?.availablePolicyTargets || []),
+  ], [customProxyGroups, policyContext]);
 
   const addedRuleSets = React.useMemo(
     () =>
@@ -93,8 +104,11 @@ export function ProxyGroupsAddedRuleSets({
         customRuleSets,
         customProxyGroups,
         proxyGroupNameOverrides,
+        literalTargetNames,
+        enabledModules: enabledProxyGroups,
+        ...policyContext,
       }),
-    [customProxyGroups, customRuleSets, proxyGroupNameOverrides],
+    [customProxyGroups, customRuleSets, enabledProxyGroups, proxyGroupNameOverrides, literalTargetNames, policyContext],
   );
   const visibleProxyGroupModules = React.useMemo(() => {
     const hidden = new Set(hiddenProxyGroups);
@@ -147,59 +161,39 @@ export function ProxyGroupsAddedRuleSets({
       item: CustomRoutingRuleSetItem,
       target: { kind: "module" | "custom"; id: string },
     ) => {
+      const matchesTarget = (value: CustomRuleSet["target"]) => {
+        const container = resolveProxyGroupTargetContainer(value, { moduleNames, customProxyGroups, literalTargetNames,
+          enabledModules: enabledProxyGroups, availablePolicyTargets: policyContext?.availablePolicyTargets });
+        return container?.kind === target.kind && container.id === target.id;
+      };
+      const customConflict = customRuleSets.some((ruleSet) => ruleSet.id === item.id &&
+        (item.rawTarget === undefined ? item.target.value !== getRuleSetTargetValue(target) : ruleSet.target !== item.rawTarget) &&
+        matchesTarget(ruleSet.target));
       if (target.kind === "module") {
         const proxyModule = visibleProxyGroupModules.find(
           (entry) => entry.id === target.id,
         );
         if (!proxyModule) return true;
-        const moduleName = resolveProxyGroupModuleName(
-          proxyModule,
-          proxyGroupNameOverrides?.[proxyModule.id],
-        );
         const builtinConflict = (proxyModule.rules ?? []).some((rule) => {
           if (rule.id !== item.id) return false;
           const edit = builtinRuleEdits?.[getModuleRuleOrderKey(proxyModule.id, rule.id)];
-          const editTarget = edit?.target
-            ? resolveProxyGroupTargetName(edit.target, {
-                moduleNames,
-                customProxyGroups,
-                fallbackTarget: moduleName,
-              })
-            : moduleName;
-          return edit?.enabled !== false && editTarget === moduleName;
+          return edit?.enabled !== false && (!edit?.target || matchesTarget(edit.target));
         });
-        const customConflict = customRuleSets.some(
-          (ruleSet) =>
-            ruleSet.id === item.id &&
-            resolveProxyGroupTargetName(ruleSet.target, {
-              moduleNames,
-              customProxyGroups,
-            }) === moduleName &&
-            item.target.value !== getRuleSetTargetValue(target),
-        );
         return builtinConflict || customConflict;
       }
 
       const group = customProxyGroups.find((entry) => entry.id === target.id);
       if (!group) return true;
-      const targetName = group.name.trim();
-      if (!targetName) return true;
-      return customRuleSets.some(
-        (ruleSet) =>
-          ruleSet.id === item.id &&
-          resolveProxyGroupTargetName(ruleSet.target, {
-            moduleNames,
-            customProxyGroups,
-          }) === targetName &&
-          item.target.value !== getRuleSetTargetValue(target),
-      );
+      return !group.name.trim() || customConflict;
     },
     [
       builtinRuleEdits,
       customProxyGroups,
       customRuleSets,
+      enabledProxyGroups,
+      literalTargetNames,
       moduleNames,
-      proxyGroupNameOverrides,
+      policyContext,
       visibleProxyGroupModules,
     ],
   );
@@ -215,18 +209,19 @@ export function ProxyGroupsAddedRuleSets({
   };
 
   const removeRuleSet = (item: CustomRoutingRuleSetItem) => {
-    removeModuleRule(item.target.id, item.id);
+    if (item.rawTarget === undefined) removeModuleRule(item.target.id, item.id);
+    else removeModuleRule(item.target.id, item.id, item.rawTarget);
     if (editingKey === item.key) cancelEditing();
   };
 
   const saveEditing = (item: CustomRoutingRuleSetItem) => {
     if (!draft) return;
 
-    const target = parseRuleSetTargetValue(draft.targetValue);
+    const target = draft.targetValue === item.target.value ? item.target : parseRuleSetTargetValue(draft.targetValue);
     const path = normalizeRuleSetPathInput(draft.path);
     if (!target || !path) return;
 
-    if (hasConflict(item, target)) {
+    if (target.kind !== "literal" && hasConflict(item, target)) {
       toast({
         title: "规则集已存在",
         description: "目标分流组里已经有同名规则集，请先移除重复项。",
@@ -235,29 +230,45 @@ export function ProxyGroupsAddedRuleSets({
       return;
     }
 
+    const commit = (metadata: Pick<RuleSetMetadata, "behavior" | "format">) => {
     const nextModuleRule: StoreRuleSetDraft = {
       id: item.id,
       name: item.name,
-      behavior: item.behavior,
+      ...metadata,
       path,
-      ...(draft.noResolve ? { noResolve: true } : {}),
+      noResolve: draft.noResolve,
     };
 
-    if (item.target.id === target.id && item.target.kind === target.kind) {
-      updateModuleRule(item.target.id, item.id, nextModuleRule);
-    } else {
+    if (item.rawTarget === undefined) updateModuleRule(item.target.id, item.id, nextModuleRule);
+    else updateModuleRule(item.target.id, item.id, nextModuleRule, item.rawTarget);
+    if ((item.target.id !== target.id || item.target.kind !== target.kind) && target.kind !== "literal") {
       if (target.kind === "module" && !enabledProxyGroups.includes(target.id)) toggleProxyGroup(target.id);
-      moveModuleRule(item.target.id, item.id, target);
-      updateModuleRule(target.id, item.id, nextModuleRule);
+      if (item.rawTarget === undefined) moveModuleRule(item.target.id, item.id, target);
+      else moveModuleRule(item.target.id, item.id, target, item.rawTarget);
     }
 
     cancelEditing();
+    };
+    if (path === item.path) {
+      commit({ behavior: item.behavior, ...(item.format ? { format: item.format } : {}) });
+      return;
+    }
+    operation((signal) => {
+      const fail = (error: unknown) => { if (!signal.aborted) toast({ title: error instanceof Error ? error.message : "规则识别失败", variant: "warning" }); };
+      try {
+        const url = /^https?:\/\//i.test(path) ? path : `${DEFAULT_RULE_PROVIDER_BASE_URL.replace(/\/+$/, "")}/${path}`;
+        const result = resolveRuleSetUrl(url, api.rules, signal);
+        const done = (metadata: RuleSetMetadata) => { if (!signal.aborted) commit({ behavior: metadata.behavior, format: metadata.format ?? "mrs" }); };
+        if (result instanceof Promise) return result.then(done).catch(fail);
+        done(result);
+      } catch (error) { fail(error); }
+    });
   };
 
   if (visibleAddedRuleSets.length === 0) {
     if (!showSearchHint) return null;
     return (
-      <p className="py-2 text-center text-xs leading-5 text-white/60">
+      <p className="py-2 text-center text-xs leading-5 text-fg-60">
         {typeof totalRules === "number" ? (
           <>
             从
@@ -274,12 +285,12 @@ export function ProxyGroupsAddedRuleSets({
   }
 
   return (
-    <div className="space-y-1 border-t border-white/10 pt-2">
+    <div className="space-y-1 border-t border-ink/10 pt-2">
       <div className="flex min-h-5 items-center gap-2">
-        <span className="text-[11px] font-medium text-white/65">
+        <span className="text-[11px] font-medium text-fg-65">
           已添加规则集
         </span>
-        <span className="ml-auto text-[10px] text-white/40">
+        <span className="ml-auto text-[10px] text-fg-40">
           已添加 {visibleAddedRuleSets.length}
         </span>
       </div>
@@ -298,7 +309,7 @@ export function ProxyGroupsAddedRuleSets({
               >
                 <div className={RULE_EDIT_ROW_CLASS}>
                   <div
-                    className={`flex h-7 ${RULE_EDIT_PRIMARY_FIELD_CLASS} items-center truncate rounded-md border border-white/10 bg-white/5 px-2 font-mono text-xs text-white/75`}
+                    className={`flex h-7 ${RULE_EDIT_PRIMARY_FIELD_CLASS} items-center truncate rounded-md border border-ink/10 bg-ink/5 px-2 font-mono text-xs text-fg-75`}
                     title={displayPath}
                   >
                     {displayPath}
@@ -318,6 +329,7 @@ export function ProxyGroupsAddedRuleSets({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
+                        {item.target.kind === "literal" && <SelectItem value={item.target.value} className="text-xs">{item.target.name}</SelectItem>}
                         {targetOptions.map((target) => (
                           <SelectItem
                             key={target.value}
@@ -329,7 +341,7 @@ export function ProxyGroupsAddedRuleSets({
                         ))}
                       </SelectContent>
                     </Select>
-                    <div className="flex h-7 shrink-0 items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2">
+                    <div className="flex h-7 shrink-0 items-center gap-1 rounded-lg border border-ink/10 bg-ink/5 px-2">
                       <Switch
                         aria-label={`设置 ${item.name} no-resolve`}
                         checked={draft.noResolve}
@@ -339,7 +351,7 @@ export function ProxyGroupsAddedRuleSets({
                           )
                         }
                       />
-                      <span className="proxy-group-rule-no-resolve-label text-[10px] text-white/50">
+                      <span className="proxy-group-rule-no-resolve-label text-[10px] text-fg-50">
                         no-resolve
                       </span>
                     </div>
@@ -370,7 +382,7 @@ export function ProxyGroupsAddedRuleSets({
                         variant="ghost"
                         size="sm"
                         onClick={() => removeRuleSet(item)}
-                        className="h-7 w-7 shrink-0 p-0 text-white/40 hover:text-red-300"
+                        className="h-7 w-7 shrink-0 p-0 text-fg-40 hover:text-red-300"
                         title="删除规则集"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
@@ -387,25 +399,25 @@ export function ProxyGroupsAddedRuleSets({
           return (
             <div
               key={item.key}
-              className="flex min-w-0 flex-wrap items-center gap-1 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px]"
+              className="flex min-w-0 flex-wrap items-center gap-1 rounded-md border border-ink/10 bg-ink/[0.04] px-2 py-1 text-[10px]"
             >
               <span className={RULE_TYPE_BADGE_CLASS}>
                 RULE-SET
               </span>
               <span
-                className="min-w-0 max-w-[16rem] truncate font-mono text-white/75"
+                className="min-w-0 max-w-[16rem] truncate font-mono text-fg-75"
                 title={displayPath}
               >
                 {displayPath}
               </span>
               {item.noResolve && (
-                <span className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-white/45">
+                <span className="rounded border border-ink/10 bg-ink/5 px-1.5 py-0.5 text-fg-45">
                   no-resolve
                 </span>
               )}
-              <ArrowRight className="h-3 w-3 shrink-0 text-white/35" />
+              <ArrowRight className="h-3 w-3 shrink-0 text-fg-35" />
               <span
-                className="max-w-[11rem] truncate rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-white/70"
+                className="max-w-[11rem] truncate rounded border border-ink/10 bg-ink/5 px-1.5 py-0.5 text-fg-70"
                 title={item.target.name}
               >
                 {item.target.name}
@@ -416,7 +428,7 @@ export function ProxyGroupsAddedRuleSets({
                   variant="ghost"
                   type="button"
                   onClick={() => startEditing(item)}
-                  className="inline-flex h-5 w-5 items-center justify-center rounded-md text-white/35 transition-colors hover:bg-white/10 hover:text-white/80"
+                  className="inline-flex h-5 w-5 items-center justify-center rounded-md text-fg-35 transition-colors hover:bg-ink/10 hover:text-fg-80"
                 >
                   <Pencil className="h-3 w-3" />
                 </IconButton>
@@ -425,7 +437,7 @@ export function ProxyGroupsAddedRuleSets({
                   variant="ghost"
                   type="button"
                   onClick={() => removeRuleSet(item)}
-                  className="inline-flex h-5 w-5 items-center justify-center rounded-md text-white/30 transition-colors hover:bg-red-500/10 hover:text-red-300"
+                  className="inline-flex h-5 w-5 items-center justify-center rounded-md text-fg-30 transition-colors hover:bg-red-500/10 hover:text-red-300"
                 >
                   <Trash2 className="h-3 w-3" />
                 </IconButton>

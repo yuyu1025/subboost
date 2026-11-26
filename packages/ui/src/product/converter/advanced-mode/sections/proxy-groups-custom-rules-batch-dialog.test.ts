@@ -10,7 +10,9 @@ const mocks = vi.hoisted(() => ({
     customRuleBatchImported: vi.fn(),
   },
   toast: vi.fn(),
+  rulesApi: undefined as import("@subboost/ui/product/api-adapter").ProductRulesApi | undefined,
 }));
+vi.mock("@subboost/ui/product/api-adapter", () => ({ useProductApiAdapter: () => ({ rules: mocks.rulesApi }) }));
 
 const stateMock = vi.hoisted(() => ({
   enabled: false,
@@ -58,6 +60,7 @@ vi.mock("@subboost/ui/components/ui/dialog", () => ({
     return React.createElement("div", null, props.children);
   },
   DialogContent: (props: any) => React.createElement("section", props, props.children),
+  DialogBody: (props: any) => React.createElement("div", props, props.children),
   DialogHeader: (props: any) => React.createElement("header", props, props.children),
   DialogTitle: (props: any) => React.createElement("h2", props, props.children),
 }));
@@ -106,6 +109,7 @@ function renderDialog(rawText = "", overrides: Record<string, unknown> = {}) {
 describe("ProxyGroupsCustomRulesBatchDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.rulesApi = undefined;
   });
 
   it("renders empty preview and resets text when closed", () => {
@@ -150,6 +154,17 @@ describe("ProxyGroupsCustomRulesBatchDialog", () => {
     expect(props.onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("previews the current rule-set type and dispatches providers instead of domain rules", () => {
+    const onImportRuleSets = vi.fn();
+    const { html, props } = renderDialog("https://local.subboost.test/geosite/udemy.mrs", {
+      defaultType: "RULE-SET", onImportRuleSets,
+    });
+    expect(html).toContain("RULE-SET");
+    mocks.buttons.at(-1).onClick();
+    expect(props.onImport).not.toHaveBeenCalled();
+    expect(onImportRuleSets).toHaveBeenCalledWith([expect.objectContaining({ id: "udemy", name: "udemy", target: "Proxy" })]);
+  });
+
   it("shows duplicate and invalid rows without importing", () => {
     const { html, props } = renderDialog(
       ["DOMAIN,example.com,Proxy", "BAD,thing,Proxy", "# comment"].join("\n"),
@@ -175,5 +190,47 @@ describe("ProxyGroupsCustomRulesBatchDialog", () => {
       ruleCount: 0,
     });
     expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ title: "无法导入", variant: "warning" }));
+  });
+
+  it.each([false, true])("commits mixed rules only after all URL detections succeed (failure=%s)", async (fail) => {
+    const url = "https://local.subboost.test/rules";
+    let complete!: (value: any) => void;
+    let reject!: (reason: unknown) => void;
+    const detectRuleSet = vi.fn(() => new Promise<any>((resolve, fail) => { complete = resolve; reject = fail; }));
+    mocks.rulesApi = { detectRuleSet };
+    const onImportRuleSets = vi.fn();
+    const { props, setters } = renderDialog(`DOMAIN,example.test,DIRECT\nRULE-SET,${url},Proxy`, { onImportRuleSets });
+    mocks.buttons.at(-1).onClick();
+    mocks.buttons.at(-1).onClick();
+    expect(detectRuleSet).toHaveBeenCalledTimes(1);
+    expect(props.onImport).not.toHaveBeenCalled();
+    if (fail) reject(new Error("无法识别规则文件"));
+    else complete({ name: "rules", path: url, format: "text", behavior: "domain" });
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalled());
+    if (fail) {
+      expect(props.onImport).not.toHaveBeenCalled();
+      expect(onImportRuleSets).not.toHaveBeenCalled();
+      expect(setters[0]).not.toHaveBeenCalled();
+    } else {
+      expect(props.onImport).toHaveBeenCalledOnce();
+      expect(onImportRuleSets).toHaveBeenCalledWith([expect.objectContaining({ path: url, format: "text" })]);
+      expect(props.onOpenChange).toHaveBeenCalledWith(false);
+    }
+  });
+
+  it.each([
+    { format: "unknown", behavior: "domain" }, { format: "mrs", behavior: "domain" },
+    { format: "text", behavior: "unknown" }, { behavior: "domain" },
+  ])("retains the draft when detection returns invalid metadata: %j", async (metadata) => {
+    mocks.rulesApi = { detectRuleSet: vi.fn().mockResolvedValue(metadata) };
+    const onImportRuleSets = vi.fn();
+    const { props, setters } = renderDialog("https://local.subboost.test/rules", {
+      defaultType: "RULE-SET", onImportRuleSets,
+    });
+    mocks.buttons.at(-1).onClick();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ title: "无法识别规则文件" })));
+    expect(onImportRuleSets).not.toHaveBeenCalled();
+    expect(props.onOpenChange).not.toHaveBeenCalled();
+    expect(setters[0]).not.toHaveBeenCalled();
   });
 });

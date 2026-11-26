@@ -37,6 +37,8 @@ import {
   type ProductMode,
 } from "@subboost/ui/product/interactions";
 import { copyTextToClipboard } from "@subboost/ui/lib/clipboard";
+import { getDraftSignature, markDraftSaved } from "@subboost/ui/product/home/unsaved-prompt";
+import { useUnappliedInputGuard } from "@subboost/ui/store/ui-store";
 
 type EditingSubscription = {
   id: string;
@@ -89,6 +91,7 @@ type Options = {
   ruleProviderBaseUrl: string;
   testUrl: string;
   testInterval: number;
+  sharedHealthChecks: boolean;
   cnIpNoResolve: boolean;
   experimentalCnUseCnRuleSet: boolean;
 };
@@ -123,6 +126,7 @@ export function useSubscriptionLink({
   ruleProviderBaseUrl,
   testUrl,
   testInterval,
+  sharedHealthChecks,
   cnIpNoResolve,
   experimentalCnUseCnRuleSet,
 }: Options) {
@@ -144,6 +148,10 @@ export function useSubscriptionLink({
   const [copied, setCopied] = React.useState(false);
   const [saveRequirementDialog, setSaveRequirementDialog] = React.useState(false);
   const [subscriptionFlowMode, setSubscriptionFlowMode] = React.useState<ProductMode>("quick");
+  // The dialog settings as they were when it opened; changes count as unsaved until the save succeeds.
+  const [openedSettings, setOpenedSettings] = React.useState("");
+  const dialogSettings = JSON.stringify([subscriptionName, autoUpdateEnabled, autoUpdateHours, smartNodeMatchingEnabled]);
+  useUnappliedInputGuard(subscriptionDialog && !subscriptionUrl && dialogSettings !== openedSettings);
   const interactions = useProductInteractionAdapter();
 
   const isEditingExistingSubscription = Boolean(editingSubscription);
@@ -187,14 +195,15 @@ export function useSubscriptionLink({
       ? Math.max(autoUpdatePolicy.minHours, autoUpdateIntervalSecondsToHours(currentAutoUpdateInterval))
       : autoUpdatePolicy.defaultHours;
 
-    setSubscriptionName(
-      isEditingExistingSubscription
-        ? editingSubscription?.name || ""
-        : `我的配置 ${formatDateInBeijing(new Date())}`
-    );
+    const nextName = isEditingExistingSubscription
+      ? editingSubscription?.name || ""
+      : `我的配置 ${formatDateInBeijing(new Date())}`;
+    const nextSmartNodeMatchingEnabled = editingSubscription?.smartNodeMatchingEnabled !== false;
+    setSubscriptionName(nextName);
     setAutoUpdateEnabled(nextAutoUpdateEnabled);
     setAutoUpdateHours(nextAutoUpdateHours);
-    setSmartNodeMatchingEnabled(editingSubscription?.smartNodeMatchingEnabled !== false);
+    setSmartNodeMatchingEnabled(nextSmartNodeMatchingEnabled);
+    setOpenedSettings(JSON.stringify([nextName, nextAutoUpdateEnabled, nextAutoUpdateHours, nextSmartNodeMatchingEnabled]));
     setSubscriptionUrl("");
     setSubscriptionDialog(true);
   }, [autoUpdatePolicy.defaultHours, autoUpdatePolicy.minHours, editingSubscription, isEditingExistingSubscription]);
@@ -296,6 +305,10 @@ export function useSubscriptionLink({
     }
 
     setIsCreatingSubscription(true);
+    const draftRevision = useConfigStore.getState().draftRevision;
+    const isCurrentDraft = () => useConfigStore.getState().draftRevision === draftRevision;
+    // Taken before the request, so edits made while saving still count as unsaved.
+    const savedDraftSignature = getDraftSignature(useConfigStore.getState());
 
     try {
       const nodeNameFilter: NodeNameFilterConfig = useConfigStore.getState().nodeNameFilter;
@@ -397,6 +410,7 @@ export function useSubscriptionLink({
             ruleProviderBaseUrl,
             testUrl,
             testInterval,
+            sharedHealthChecks,
             cnIpNoResolve,
             experimentalCnUseCnRuleSet,
             autoSelectStrategy: "url-test",
@@ -411,6 +425,7 @@ export function useSubscriptionLink({
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const data = await response.json().catch(() => ({} as any));
+      if (!isCurrentDraft()) return;
 
       if (response.status === 401) {
         clearUser();
@@ -445,12 +460,14 @@ export function useSubscriptionLink({
             smartNodeMatchingEnabled,
           });
         }
+        markDraftSaved(savedDraftSignature);
         trackSubscriptionMutation("success");
       } else {
         trackSubscriptionMutation(response.status >= 500 ? "runtimeError" : "validationError");
         toast({ title: data.error || "创建失败", variant: "destructive" });
       }
     } catch (error) {
+      if (!isCurrentDraft()) return;
       console.error("Create subscription error:", error);
       trackSubscriptionMutation("runtimeError");
       toast({ title: "创建订阅失败，请稍后重试", variant: "destructive" });
@@ -492,6 +509,7 @@ export function useSubscriptionLink({
     subscriptionAdapter,
     template,
     testInterval,
+    sharedHealthChecks,
     testUrl,
     trackSubscriptionMutation,
   ]);
