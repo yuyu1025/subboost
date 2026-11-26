@@ -82,6 +82,8 @@ jobs:
     outputs:
       deployment_url: ${{ steps.deploy.outputs.deployment_url }}
       deployment_id: ${{ steps.deploy.outputs.deployment_id }}
+      vercel_org_id: ${{ steps.resolve_vercel.outputs.vercel_org_id }}
+      vercel_project_id: ${{ steps.resolve_vercel.outputs.vercel_project_id }}
     steps:
       - uses: actions/checkout@v6
 
@@ -89,7 +91,8 @@ jobs:
         with:
           node-version: "22.19.0"
 
-      - name: Validate Vercel secrets
+      - name: Resolve Vercel org and project IDs
+        id: resolve_vercel
         shell: bash
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -97,14 +100,103 @@ jobs:
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
         run: |
           set -euo pipefail
-          missing=()
-          [ -z "${VERCEL_TOKEN}" ] && missing+=("VERCEL_TOKEN")
-          [ -z "${VERCEL_ORG_ID}" ] && missing+=("VERCEL_ORG_ID")
-          [ -z "${VERCEL_PROJECT_ID}" ] && missing+=("VERCEL_PROJECT_ID")
-          if [ "${#missing[@]}" -gt 0 ]; then
-            echo "Missing required GitHub Secrets: ${missing[*]}" >&2
+          if [ -z "${VERCEL_TOKEN}" ]; then
+            echo "Missing required GitHub Secret: VERCEL_TOKEN" >&2
             exit 1
           fi
+
+          if [ -n "${VERCEL_ORG_ID}" ] && [ -n "${VERCEL_PROJECT_ID}" ]; then
+            echo "vercel_org_id=${VERCEL_ORG_ID}" >> "$GITHUB_OUTPUT"
+            echo "vercel_project_id=${VERCEL_PROJECT_ID}" >> "$GITHUB_OUTPUT"
+            echo "Using VERCEL_ORG_ID and VERCEL_PROJECT_ID from GitHub Secrets."
+            exit 0
+          fi
+
+          resolved="$(node -e '
+            const token = process.env.VERCEL_TOKEN;
+            const repoFull = (process.env.GITHUB_REPOSITORY || "").toLowerCase();
+            const repoName = (repoFull.split("/")[1] || "").toLowerCase();
+            const headers = { Authorization: `Bearer ${token}` };
+
+            async function apiGet(path) {
+              const res = await fetch(`https://api.vercel.com${path}`, { headers });
+              if (!res.ok) {
+                throw new Error(`GET ${path} failed (${res.status}): ${await res.text()}`);
+              }
+              return res.json();
+            }
+
+            (async () => {
+              const userRes = await apiGet("/v2/user");
+              const userId = userRes?.user?.id || "";
+
+              let teamIds = [];
+              try {
+                const teamsRes = await apiGet("/v2/teams?limit=100");
+                teamIds = (teamsRes?.teams || []).map((t) => t.id).filter(Boolean);
+              } catch (err) {
+                console.error(`Warning: failed to list Vercel teams: ${err.message}`);
+              }
+
+              const scopes = [null, ...teamIds];
+              const seen = new Set();
+              const allProjects = [];
+
+              for (const teamId of scopes) {
+                const query = teamId ? `?limit=100&teamId=${encodeURIComponent(teamId)}` : "?limit=100";
+                try {
+                  const data = await apiGet(`/v9/projects${query}`);
+                  for (const p of data?.projects || []) {
+                    if (!p?.id || seen.has(p.id)) continue;
+                    seen.add(p.id);
+                    allProjects.push({
+                      id: p.id,
+                      name: p.name || "",
+                      orgId: teamId || p.accountId || userId,
+                      link: p.link || null,
+                    });
+                  }
+                } catch (err) {
+                  console.error(`Warning: failed to list projects for scope ${teamId || "personal"}: ${err.message}`);
+                }
+              }
+
+              let matched = allProjects.find((p) => {
+                if (p.link?.type !== "github") return false;
+                const linkedRepo = `${p.link.org || ""}/${p.link.repo || ""}`.toLowerCase();
+                return linkedRepo === repoFull;
+              });
+
+              if (!matched && repoName) {
+                matched = allProjects.find((p) => p.name.toLowerCase() === repoName);
+              }
+
+              if (!matched) {
+                const names = allProjects.map((p) => `${p.name} (${p.id})`).join(", ") || "(none)";
+                throw new Error(
+                  `Could not auto-detect Vercel project for ${process.env.GITHUB_REPOSITORY}. Found projects: ${names}. Set VERCEL_ORG_ID and VERCEL_PROJECT_ID secrets manually.`
+                );
+              }
+
+              const orgId = process.env.VERCEL_ORG_ID || matched.orgId;
+              const projectId = process.env.VERCEL_PROJECT_ID || matched.id;
+              if (!orgId || !projectId) {
+                throw new Error("Resolved Vercel orgId or projectId is empty.");
+              }
+              process.stdout.write(JSON.stringify({ orgId, projectId, name: matched.name }));
+            })().catch((err) => {
+              console.error(err);
+              process.exit(1);
+            });
+          ')"
+
+          org_id="$(RESOLVED="${resolved}" node -e 'process.stdout.write(JSON.parse(process.env.RESOLVED).orgId)')"
+          project_id="$(RESOLVED="${resolved}" node -e 'process.stdout.write(JSON.parse(process.env.RESOLVED).projectId)')"
+          project_name="$(RESOLVED="${resolved}" node -e 'process.stdout.write(JSON.parse(process.env.RESOLVED).name)')"
+
+          echo "Auto-discovered Vercel project: ${project_name} (${project_id}) under org ${org_id}"
+          echo "vercel_org_id=${org_id}" >> "$GITHUB_OUTPUT"
+          echo "vercel_project_id=${project_id}" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: npm ci
@@ -115,15 +207,15 @@ jobs:
       - name: Pull Vercel production environment
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_ORG_ID: ${{ steps.resolve_vercel.outputs.vercel_org_id }}
+          VERCEL_PROJECT_ID: ${{ steps.resolve_vercel.outputs.vercel_project_id }}
         run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
 
       - name: Build project for Vercel production
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_ORG_ID: ${{ steps.resolve_vercel.outputs.vercel_org_id }}
+          VERCEL_PROJECT_ID: ${{ steps.resolve_vercel.outputs.vercel_project_id }}
         run: vercel build --prod --token="$VERCEL_TOKEN"
 
       - name: Deploy prebuilt artifacts to Vercel production
@@ -131,8 +223,8 @@ jobs:
         shell: bash
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_ORG_ID: ${{ steps.resolve_vercel.outputs.vercel_org_id }}
+          VERCEL_PROJECT_ID: ${{ steps.resolve_vercel.outputs.vercel_project_id }}
         run: |
           set -euo pipefail
           deployment_url="$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN" | tail -n 1 | tr -d '[:space:]')"
@@ -197,8 +289,8 @@ jobs:
         shell: bash
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_ORG_ID: ${{ needs.deploy-vercel.outputs.vercel_org_id }}
+          VERCEL_PROJECT_ID: ${{ needs.deploy-vercel.outputs.vercel_project_id }}
           EXPECTED_DEPLOYMENT_ID: ${{ needs.deploy-vercel.outputs.deployment_id }}
         run: |
           set -euo pipefail
