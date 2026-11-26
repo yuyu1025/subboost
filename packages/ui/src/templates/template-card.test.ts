@@ -75,9 +75,12 @@ function renderCard(overrides: Partial<React.ComponentProps<typeof TemplateCard>
     formatDate: (value) => `date:${value}`,
     onEngage: vi.fn(),
     onApply: vi.fn(),
+    onDownload: vi.fn(),
     onDelete: vi.fn(),
     isLoggedIn: true,
     isApplying: false,
+    isDownloading: false,
+    showDownload: true,
     showDelete: true,
     showVisibility: true,
     showEngagement: true,
@@ -93,7 +96,7 @@ describe("TemplateCard", () => {
     mocks.captures = { buttons: [], nativeButtons: [] };
   });
 
-  it("renders public engaged templates and wires delete, apply, and engagement actions", () => {
+  it("renders public engaged templates and wires download, delete, apply, and engagement actions", () => {
     const { html, props } = renderCard({
       template: { ...baseTemplate, isEngaged: true, isPublic: true },
       engagementActionLabel: "取消收藏",
@@ -108,6 +111,11 @@ describe("TemplateCard", () => {
     expect(html).toContain("公开");
     expect(html).toContain("使用");
 
+    const downloadButton = mocks.captures.buttons.find((button) => button.title === "下载模板");
+    expect(downloadButton.disabled).toBe(false);
+    downloadButton.onClick();
+    expect(props.onDownload).toHaveBeenCalled();
+
     mocks.captures.buttons.find((button) => button.title === "删除模板").onClick();
     expect(props.onDelete).toHaveBeenCalled();
     mocks.captures.buttons.find((button) => button.children?.includes?.("使用")).onClick();
@@ -120,7 +128,7 @@ describe("TemplateCard", () => {
     expect(props.onEngage).toHaveBeenCalled();
   });
 
-  it("renders applying, private, and logged-out fallback states", () => {
+  it("renders applying, downloading, private, and logged-out fallback states", () => {
     const { html } = renderCard({
       template: {
         ...baseTemplate,
@@ -132,6 +140,7 @@ describe("TemplateCard", () => {
       onDelete: undefined,
       isLoggedIn: false,
       isApplying: true,
+      isDownloading: true,
       showDelete: true,
     });
 
@@ -140,6 +149,7 @@ describe("TemplateCard", () => {
     expect(html).toContain("私有");
     expect(html).toContain("应用中");
     expect(html).toContain("loader-icon");
+    expect(mocks.captures.buttons.find((button) => button.title === "下载模板").disabled).toBe(true);
     expect(mocks.captures.buttons.some((button) => button.title === "删除模板")).toBe(false);
     expect(mocks.captures.buttons.find((button) => button.children?.includes?.("应用中")).disabled).toBe(true);
 
@@ -150,6 +160,7 @@ describe("TemplateCard", () => {
 
   it("hides optional controls when the parent disables them", () => {
     const { html } = renderCard({
+      showDownload: false,
       showDelete: false,
       showEngagement: false,
       showVisibility: false,
@@ -157,6 +168,7 @@ describe("TemplateCard", () => {
 
     expect(html).not.toContain("公开");
     expect(html).not.toContain("私有");
+    expect(mocks.captures.buttons.some((button) => button.title === "下载模板")).toBe(false);
     expect(mocks.captures.buttons.some((button) => button.title === "删除模板")).toBe(false);
     expect(mocks.captures.buttons.some((button) => button.title === "登录后可收藏")).toBe(false);
   });

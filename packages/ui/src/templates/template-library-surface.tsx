@@ -43,6 +43,7 @@ export type TemplateLibraryAdapter = {
   };
   enabledTabs?: Partial<Record<TabValue, boolean>>;
   allowUpload?: boolean;
+  allowDownload?: boolean;
   allowEngagement?: boolean;
   allowDelete?: boolean;
   allowPublicTemplates?: boolean;
@@ -57,6 +58,29 @@ export type TemplateLibraryAdapter = {
 type Props = {
   adapter: TemplateLibraryAdapter;
 };
+
+function buildTemplateDownloadFilename(name: string, extension: "json" | "yaml"): string {
+  const base =
+    String(name || "subboost-template")
+      .trim()
+      .replace(/[\r\n]/g, " ")
+      .replace(/[<>:"/\\|?*]+/g, "")
+      .replace(/\s+/g, "_")
+      .replace(/\.(?:json|ya?ml)$/i, "")
+      .slice(0, 80) || "subboost-template";
+  return `${base}.${extension}`;
+}
+
+function triggerBrowserDownload(href: string, filename: string) {
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = filename;
+  anchor.rel = "noopener noreferrer";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
 
 function getInteractionTemplateSource(tab: TabValue): ProductTemplateSource {
   if (tab === "default") return "default";
@@ -113,6 +137,7 @@ function TemplateLibraryInner({ adapter }: Props) {
   const [isUploading, setIsUploading] = React.useState(false);
   const [uploadMode, setUploadMode] = React.useState<"config" | "yaml">("config");
   const [uploadYamlContent, setUploadYamlContent] = React.useState("");
+  const [downloadingId, setDownloadingId] = React.useState<string | null>(null);
   const interactions = adapter.interactions;
 
   React.useEffect(() => {
@@ -219,6 +244,44 @@ function TemplateLibraryInner({ adapter }: Props) {
       toast({ title: "应用模板失败，请稍后重试", variant: "destructive" });
     } finally {
       setApplyingId(null);
+    }
+  };
+
+  const handleDownloadTemplate = async (item: Template) => {
+    if (adapter.allowDownload === false) return;
+    setDownloadingId(item.id);
+    try {
+      const tpl = await adapter.loadTemplateDetail(item.id);
+      if (!tpl) {
+        toast({ title: "获取模板失败", variant: "destructive" });
+        return;
+      }
+
+      if (tpl.kind === "config" && tpl.config && typeof tpl.config === "object") {
+        const content = JSON.stringify(tpl.config, null, 2);
+        const filename = buildTemplateDownloadFilename(item.name, "json");
+        const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+        const objectUrl = URL.createObjectURL(blob);
+        triggerBrowserDownload(objectUrl, filename);
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+        return;
+      }
+
+      if (tpl.kind === "yaml" && typeof tpl.config === "string" && tpl.config.trim()) {
+        const filename = buildTemplateDownloadFilename(item.name, "yaml");
+        const blob = new Blob([tpl.config], { type: "application/x-yaml;charset=utf-8" });
+        const objectUrl = URL.createObjectURL(blob);
+        triggerBrowserDownload(objectUrl, filename);
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+        return;
+      }
+
+      toast({ title: "模板内容无效，无法下载", variant: "destructive" });
+    } catch (error) {
+      console.error("Download template error:", error);
+      toast({ title: "下载模板失败，请稍后重试", variant: "destructive" });
+    } finally {
+      setDownloadingId(null);
     }
   };
 
@@ -405,9 +468,12 @@ function TemplateLibraryInner({ adapter }: Props) {
                     engagementLoginRequiredLabel={adapter.labels?.engagementLoginRequired}
                     onEngage={() => void handleEngagement(item.id)}
                     onApply={() => void handleApplyTemplate(item.id)}
+                    onDownload={() => void handleDownloadTemplate(item)}
                     onDelete={() => void handleDeleteTemplate(item.id)}
                     isLoggedIn={!!user}
                     isApplying={applyingId === item.id}
+                    isDownloading={downloadingId === item.id}
+                    showDownload={adapter.allowDownload !== false}
                     showDelete={tab === "my" && adapter.allowDelete !== false && Boolean(adapter.deleteTemplate)}
                     showVisibility={tab === "my" && allowPublicTemplates}
                     showEngagement={adapter.allowEngagement !== false}

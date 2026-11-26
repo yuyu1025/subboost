@@ -157,6 +157,47 @@ describe("local template routes", () => {
     await expect(response.json()).resolves.toMatchObject({ template: { id: "tpl-1", kind: "config" } });
   });
 
+  it("downloads template config as a json attachment when download query is enabled", async () => {
+    const response = await itemRoute.GET(new Request("http://local.test/api/templates/tpl-1?download=1"), {
+      params: Promise.resolve({ id: "tpl-1" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("content-disposition")).toBe(
+      `attachment; filename="Local.json"; filename*=UTF-8''Local.json`
+    );
+    await expect(response.text()).resolves.toBe(JSON.stringify({ template: "standard" }, null, 2));
+
+    vi.mocked(getTemplateDetail).mockResolvedValueOnce({
+      ...template,
+      name: "流媒体/配置?.json",
+      kind: "config",
+      config: { template: "full" },
+    } as never);
+    const unicodeResponse = await itemRoute.GET(new Request("http://local.test/api/templates/tpl-1?download=true"), {
+      params: Promise.resolve({ id: "tpl-1" }),
+    });
+    expect(unicodeResponse.status).toBe(200);
+    expect(unicodeResponse.headers.get("content-disposition")).toBe(
+      `attachment; filename="subboost-template.json"; filename*=UTF-8''${encodeURIComponent("流媒体配置.json")}`
+    );
+
+    vi.mocked(getTemplateDetail).mockResolvedValueOnce({
+      ...template,
+      name: "   ",
+      kind: "config",
+      config: { template: "minimal" },
+    } as never);
+    const fallbackResponse = await itemRoute.GET(new Request("http://local.test/api/templates/tpl-1?download=1"), {
+      params: Promise.resolve({ id: "tpl-1" }),
+    });
+    expect(fallbackResponse.headers.get("content-disposition")).toBe(
+      `attachment; filename="subboost-template.json"; filename*=UTF-8''subboost-template.json`
+    );
+  });
+
   it("reports missing and failed template detail reads for admins", async () => {
     vi.mocked(getTemplateDetail).mockResolvedValueOnce(null);
     let response = await itemRoute.GET(new Request("http://local.test/api/templates/missing"), {

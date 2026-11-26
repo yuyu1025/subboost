@@ -298,6 +298,81 @@ describe("TemplateLibrarySurface", () => {
     expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ title: "应用模板失败，请稍后重试", variant: "destructive" }));
   });
 
+  it("downloads config and yaml templates and handles missing, invalid, disabled, and failing downloads", async () => {
+    const anchors: Array<{ href: string; download: string; rel: string; style: { display: string }; click: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> }> = [];
+    const appendChild = vi.fn();
+    vi.stubGlobal("document", {
+      createElement: vi.fn(() => {
+        const anchor = { href: "", download: "", rel: "", style: { display: "" }, click: vi.fn(), remove: vi.fn() };
+        anchors.push(anchor);
+        return anchor;
+      }),
+      body: { appendChild },
+    });
+    const createObjectURL = vi.fn(() => "blob:template-download");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    vi.stubGlobal("setTimeout", (fn: () => void) => {
+      fn();
+      return 1;
+    });
+
+    const adapter = createAdapter();
+    renderSurface(adapter, { 2: "catalog", 3: templates });
+
+    mocks.captures.cards[1].onDownload();
+    await flushPromises();
+    expect(adapter.loadTemplateDetail).toHaveBeenCalledWith("tpl-config");
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+    expect(anchors[0]).toMatchObject({
+      href: "blob:template-download",
+      download: "Work_Config.json",
+      rel: "noopener noreferrer",
+    });
+    expect(anchors[0].click).toHaveBeenCalled();
+    expect(anchors[0].remove).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:template-download");
+
+    mocks.captures.cards[2].onDownload();
+    await flushPromises();
+    expect(anchors[1]).toMatchObject({
+      href: "blob:template-download",
+      download: "Yaml_Template.yaml",
+    });
+
+    adapter.loadTemplateDetail.mockResolvedValueOnce({ kind: "config", config: { template: "minimal" } });
+    renderSurface(adapter, {
+      2: "my",
+      3: [{ ...templates[1], id: "tpl-fallback", name: "???/.json" }],
+    });
+    mocks.captures.cards[0].onDownload();
+    await flushPromises();
+    expect(anchors[2]).toMatchObject({ download: "subboost-template.json" });
+
+    adapter.loadTemplateDetail.mockResolvedValueOnce(null);
+    mocks.captures.cards[0].onDownload();
+    await flushPromises();
+    expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ title: "获取模板失败", variant: "destructive" }));
+
+    adapter.loadTemplateDetail.mockResolvedValueOnce({ kind: "yaml", config: "   " });
+    mocks.captures.cards[0].onDownload();
+    await flushPromises();
+    expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ title: "模板内容无效，无法下载", variant: "destructive" }));
+
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    adapter.loadTemplateDetail.mockRejectedValueOnce(new Error("offline"));
+    mocks.captures.cards[0].onDownload();
+    await flushPromises();
+    expect(mocks.toast).toHaveBeenCalledWith(expect.objectContaining({ title: "下载模板失败，请稍后重试", variant: "destructive" }));
+
+    const disabledAdapter = createAdapter({ allowDownload: false });
+    renderSurface(disabledAdapter, { 2: "default", 3: templates });
+    expect(mocks.captures.cards[0].showDownload).toBe(false);
+    mocks.captures.cards[0].onDownload();
+    await flushPromises();
+    expect(disabledAdapter.loadTemplateDetail).not.toHaveBeenCalled();
+  });
+
   it("engages and deletes templates with guards and error handling", async () => {
     const adapter = createAdapter();
     const { setters } = renderSurface(adapter, { 2: "my", 3: templates });

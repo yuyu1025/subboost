@@ -26,9 +26,12 @@ export function TemplateCard({
   engagementLoginRequiredLabel = "登录后可收藏",
   onEngage,
   onApply,
+  onDownload,
   onDelete,
   isLoggedIn,
   isApplying,
+  isDownloading = false,
+  showDownload = true,
   showDelete,
   showVisibility,
   showEngagement,
@@ -40,9 +43,12 @@ export function TemplateCard({
   engagementLoginRequiredLabel?: string;
   onEngage: () => void;
   onApply: () => void;
+  onDownload?: () => void;
   onDelete?: () => void;
   isLoggedIn: boolean;
   isApplying: boolean;
+  isDownloading?: boolean;
+  showDownload?: boolean;
   showDelete: boolean;
   showVisibility: boolean;
   showEngagement: boolean;
@@ -58,6 +64,17 @@ export function TemplateCard({
             <p className="text-sm text-white/50 mt-1 line-clamp-2">{template.description}</p>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
+            {showDownload && onDownload && (
+              <IconButton
+                label="下载模板"
+                variant="outline"
+                onClick={onDownload}
+                disabled={isDownloading}
+                className="h-8 w-8 border-white/10 hover:border-white/30"
+              >
+                {isDownloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              </IconButton>
+            )}
             {showDelete && onDelete && (
               <IconButton
                 label="删除模板"
