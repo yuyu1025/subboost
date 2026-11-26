@@ -1,0 +1,323 @@
+name: Release Vercel Deploy & Promote
+
+on:
+  push:
+    branches:
+      - "release/*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-vercel-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OBSERVATION_MINUTES: 15
+  POLL_INTERVAL_SECONDS: 30
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      release_branch: ${{ steps.meta.outputs.release_branch }}
+      release_version: ${{ steps.meta.outputs.release_version }}
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.19.0"
+
+      - name: Validate release branch and version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" != release/* ]]; then
+            echo "This workflow must run on a release/* branch, got ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+
+          release_version="$(node -p "require('./package.json').version")"
+          if [ -z "${release_version}" ]; then
+            echo "Failed to read version from package.json." >&2
+            exit 1
+          fi
+
+          tag_name="v${release_version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag_name}" >/dev/null 2>&1; then
+            echo "Tag ${tag_name} already exists on origin. Bump package.json version before releasing." >&2
+            exit 1
+          fi
+
+          short_sha="${GITHUB_SHA::12}"
+          echo "release_branch=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${tag_name}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+
+  checks:
+    runs-on: ubuntu-latest
+    needs: meta
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.19.0"
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:coverage
+      - run: npm run check:local-app
+
+  deploy-vercel:
+    runs-on: ubuntu-latest
+    needs:
+      - meta
+      - checks
+    outputs:
+      deployment_url: ${{ steps.deploy.outputs.deployment_url }}
+      deployment_id: ${{ steps.deploy.outputs.deployment_id }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.19.0"
+
+      - name: Validate Vercel secrets
+        shell: bash
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${VERCEL_TOKEN}" ] && missing+=("VERCEL_TOKEN")
+          [ -z "${VERCEL_ORG_ID}" ] && missing+=("VERCEL_ORG_ID")
+          [ -z "${VERCEL_PROJECT_ID}" ] && missing+=("VERCEL_PROJECT_ID")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing required GitHub Secrets: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel production environment
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build project for Vercel production
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy prebuilt artifacts to Vercel production
+        id: deploy
+        shell: bash
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          deployment_url="$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN" | tail -n 1 | tr -d '[:space:]')"
+          if [[ "${deployment_url}" != https://* ]]; then
+            echo "Unexpected Vercel deployment URL: ${deployment_url}" >&2
+            exit 1
+          fi
+
+          deployment_id="$(DEPLOYMENT_URL="${deployment_url}" node -e '
+            (async () => {
+              const host = new URL(process.env.DEPLOYMENT_URL).host;
+              const orgId = process.env.VERCEL_ORG_ID || "";
+              const teamQuery = orgId.startsWith("team_") ? `?teamId=${encodeURIComponent(orgId)}` : "";
+              const res = await fetch(`https://api.vercel.com/v13/deployments/${encodeURIComponent(host)}${teamQuery}`, {
+                headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` },
+              });
+              if (!res.ok) {
+                throw new Error(`Failed to fetch deployment info (${res.status}): ${await res.text()}`);
+              }
+              const data = await res.json();
+              if (!data.id) {
+                throw new Error("Vercel deployment ID was not returned.");
+              }
+              process.stdout.write(data.id);
+            })().catch((err) => {
+              console.error(err);
+              process.exit(1);
+            });
+          ')"
+
+          echo "deployment_url=${deployment_url}" >> "$GITHUB_OUTPUT"
+          echo "deployment_id=${deployment_id}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Vercel Production Deployment Ready"
+            echo ""
+            echo "- **Branch**: \`${{ needs.meta.outputs.release_branch }}\`"
+            echo "- **Commit**: \`${GITHUB_SHA}\`"
+            echo "- **Target Tag**: \`${{ needs.meta.outputs.tag_name }}\`"
+            echo "- **Deployment URL**: ${deployment_url}"
+            echo "- **Deployment ID**: \`${deployment_id}\`"
+            echo ""
+            echo "Entering **${OBSERVATION_MINUTES}-minute** rollback observation window. To abort merging to \`main\` and tagging:"
+            echo "1. Roll back to a previous deployment in the Vercel Dashboard (or run \`vercel rollback\`), **or**"
+            echo "2. Cancel this GitHub Actions workflow run, **or**"
+            echo "3. Push a new commit to \`${{ needs.meta.outputs.release_branch }}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  wait-and-promote:
+    runs-on: ubuntu-latest
+    needs:
+      - meta
+      - deploy-vercel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.19.0"
+
+      - name: Wait for rollback observation window
+        id: observe
+        shell: bash
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          EXPECTED_DEPLOYMENT_ID: ${{ needs.deploy-vercel.outputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            async function getActiveProductionId() {
+              const projectId = process.env.VERCEL_PROJECT_ID;
+              const orgId = process.env.VERCEL_ORG_ID || "";
+              const teamQuery = orgId.startsWith("team_") ? `?teamId=${encodeURIComponent(orgId)}` : "";
+              const res = await fetch(`https://api.vercel.com/v9/projects/${encodeURIComponent(projectId)}${teamQuery}`, {
+                headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` },
+              });
+              if (!res.ok) {
+                throw new Error(`Vercel API returned ${res.status}: ${await res.text()}`);
+              }
+              const data = await res.json();
+              return data?.targets?.production?.id || "";
+            }
+
+            (async () => {
+              const totalMs = Number(process.env.OBSERVATION_MINUTES || 15) * 60 * 1000;
+              const pollMs = Number(process.env.POLL_INTERVAL_SECONDS || 30) * 1000;
+              const expectedId = process.env.EXPECTED_DEPLOYMENT_ID;
+              const deadline = Date.now() + totalMs;
+
+              console.log(`Observing Vercel production deployment ${expectedId} for ${totalMs / 60000} minutes...`);
+
+              while (Date.now() < deadline) {
+                const remainingMs = deadline - Date.now();
+                await sleep(Math.min(pollMs, remainingMs));
+
+                try {
+                  const activeId = await getActiveProductionId();
+                  if (activeId && activeId !== expectedId) {
+                    console.log(`::warning::Manual rollback or newer deployment detected on Vercel (expected ${expectedId}, active ${activeId}). Skipping merge to main and tagging.`);
+                    process.exit(42);
+                  }
+                  const minsLeft = Math.max(0, Math.ceil((deadline - Date.now()) / 60000));
+                  console.log(`Active production deployment still matches ${expectedId}. ~${minsLeft} min remaining.`);
+                } catch (err) {
+                  console.log(`::warning::Transient error checking Vercel status: ${err.message}`);
+                }
+              }
+
+              // Final fail-closed verification before promoting to main
+              const finalActiveId = await getActiveProductionId();
+              if (!finalActiveId) {
+                throw new Error("Could not determine active Vercel production deployment at final verification.");
+              }
+              if (finalActiveId !== expectedId) {
+                console.log(`::warning::Manual rollback or newer deployment detected on Vercel at final check (expected ${expectedId}, active ${finalActiveId}). Skipping merge to main and tagging.`);
+                process.exit(42);
+              }
+              console.log(`Observation window completed cleanly. Active production deployment is still ${expectedId}.`);
+            })().catch((err) => {
+              console.error(err);
+              process.exit(1);
+            });
+          ' && status=0 || status=$?
+
+          if [ "${status}" -eq 42 ]; then
+            echo "rolled_back=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Rollback Detected — Promotion Skipped"
+              echo ""
+              echo "Vercel production deployment is no longer \`${EXPECTED_DEPLOYMENT_ID}\`."
+              echo "Skipped merging \`${{ needs.meta.outputs.release_branch }}\` into \`main\` and creating tag \`${{ needs.meta.outputs.tag_name }}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          elif [ "${status}" -ne 0 ]; then
+            exit "${status}"
+          fi
+
+          echo "rolled_back=false" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository for promotion
+        if: steps.observe.outputs.rolled_back != 'true'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
+
+      - name: Merge release branch into main and push tag
+        if: steps.observe.outputs.rolled_back != 'true'
+        shell: bash
+        env:
+          RELEASE_BRANCH: ${{ needs.meta.outputs.release_branch }}
+          TAG_NAME: ${{ needs.meta.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin main "${RELEASE_BRANCH}" --tags
+
+          current_release_sha="$(git rev-parse "origin/${RELEASE_BRANCH}")"
+          if [ "${current_release_sha}" != "${GITHUB_SHA}" ]; then
+            echo "::warning::Branch ${RELEASE_BRANCH} moved from ${GITHUB_SHA} to ${current_release_sha}. Skipping promotion of stale commit."
+            exit 0
+          fi
+
+          if git rev-parse "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "Tag ${TAG_NAME} already exists. Aborting promotion." >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B main origin/main
+          git merge --no-ff "${GITHUB_SHA}" -m "chore(release): merge ${RELEASE_BRANCH} into main (${TAG_NAME})"
+          git push origin main
+
+          git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
+          git push origin "refs/tags/${TAG_NAME}"
+
+          {
+            echo "### Release Promoted to \`main\`"
+            echo ""
+            echo "- **Merged Branch**: \`${RELEASE_BRANCH}\` (\`${GITHUB_SHA}\`)"
+            echo "- **Target Branch**: \`main\`"
+            echo "- **Created Tag**: \`${TAG_NAME}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
